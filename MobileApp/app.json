@@ -23,20 +23,6 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.pharmacy.app"
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
-    },
-    "plugins": [
-      "expo-image-picker"
-    ],
-    "scheme": "pharmacyapp",
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
       "package": "com.pharmacy.app",
       "intentFilters": [
         {
@@ -46,11 +32,28 @@
               "scheme": "pharmacyapp"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         }
+      ],
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
       ]
     },
-    "sdkVersion": "54.0.0"
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-image-picker"
+    ],
+    "scheme": "pharmacyapp",
+    "sdkVersion": "54.0.0",
+    "extra": {
+      "eas": {
+        "projectId": "8835182a-7467-41b9-8369-6a82594ad730"
+      }
+    }
   }
 }
-
