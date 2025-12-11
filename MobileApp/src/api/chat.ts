@@ -26,7 +26,7 @@ export const chatApi = {
     image?: string,
     conversationHistory?: ChatMessage[]
   ): Promise<ChatResponse> => {
-    const response = await apiClient.post<ChatResponse>('/chat', {
+    const response = await apiClient.post<ChatResponse>('/api/chat', {
       message,
       image,
       conversationHistory: conversationHistory || [],

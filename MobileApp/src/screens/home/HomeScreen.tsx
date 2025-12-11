@@ -15,6 +15,7 @@ import { getSearchHistory, addToSearchHistory, removeFromSearchHistory, SearchHi
 import { useAuth } from '../../contexts/AuthContext';
 import { useSocket } from '../../contexts/SocketContext';
 import { useQueryClient } from '@tanstack/react-query';
+import { AIFloatingChat } from '../../components/chat/AIFloatingChat';
 
 export default function HomeScreen() {
   const navigation = useNavigation();
@@ -485,6 +486,8 @@ export default function HomeScreen() {
         <Ionicons name="arrow-forward" size={20} color={COLORS.primary} />
       </TouchableOpacity>
       </ScrollView>
+
+      <AIFloatingChat />
     </SafeAreaView>
   );
 }

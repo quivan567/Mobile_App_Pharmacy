@@ -31,7 +31,25 @@
     "plugins": [
       "expo-image-picker"
     ],
-    "scheme": "myapp",
+    "scheme": "pharmacyapp",
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.pharmacy.app",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "pharmacyapp"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
     "sdkVersion": "54.0.0"
   }
 }

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { MomoService, MomoCallbackData } from '../services/momoService';
+import { VnpayService, VnpayCallbackData } from '../services/vnpayService';
 import { Order, LoyaltyAccount, LoyaltyTransaction, IOrder } from '../models/schema';
 import { PPointController } from './pPointController';
 
@@ -572,6 +573,157 @@ export class PaymentController {
         success: false,
         message: error.message || 'Failed to get payment status',
       });
+    }
+  }
+
+  /**
+   * Create VNPay payment request
+   * POST /api/payment/vnpay/create
+   */
+  static async createVnpayPayment(req: Request, res: Response) {
+    try {
+      const { orderId, amount, orderInfo, returnUrl, ipnUrl } = req.body;
+
+      if (!orderId || !amount) {
+        return res.status(400).json({
+          success: false,
+          message: 'Order ID and amount are required',
+        });
+      }
+
+      const order = await Order.findById(orderId);
+      if (!order) {
+        return res.status(404).json({
+          success: false,
+          message: 'Order not found',
+        });
+      }
+
+      // Verify ownership if authenticated
+      const authReq = req as AuthenticatedRequest;
+      if (authReq.user?.id && order.userId && order.userId.toString() !== authReq.user.id) {
+        return res.status(403).json({
+          success: false,
+          message: 'Unauthorized access to this order',
+        });
+      }
+
+      // Validate amount (allow tiny diff for rounding)
+      const diff = Math.abs(order.totalAmount - amount);
+      if (diff > 1) {
+        return res.status(400).json({
+          success: false,
+          message: `Amount mismatch: Order total is ${order.totalAmount} but payment amount is ${amount}`,
+        });
+      }
+
+      if (order.paymentMethod !== 'vnpay') {
+        return res.status(400).json({
+          success: false,
+          message: 'Order payment method is not VNPay',
+        });
+      }
+
+      // Build VNPay payment URL
+      const payment = VnpayService.createPaymentUrl({
+        orderId: order.orderNumber,
+        orderInfo: orderInfo || `Thanh toán đơn hàng ${order.orderNumber}`,
+        amount,
+        extraData: orderId, // store DB id
+        ipAddr: req.ip || req.headers['x-forwarded-for'] as string || '',
+        returnUrl,
+        ipnUrl,
+      });
+
+      return res.json({
+        success: true,
+        data: payment,
+      });
+    } catch (error: any) {
+      console.error('Create VNPay payment error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Không thể tạo yêu cầu thanh toán VNPay',
+      });
+    }
+  }
+
+  /**
+   * Handle VNPay return URL (client redirect)
+   * GET /api/payment/vnpay/return
+   */
+  static async handleVnpayReturn(req: Request, res: Response) {
+    try {
+      const query = req.query as any as VnpayCallbackData;
+      const isValid = VnpayService.verifyCallback(query);
+      if (!isValid) {
+        return res.json({ success: false, message: 'Invalid signature' });
+      }
+
+      const orderNumber = query.vnp_TxnRef;
+      const order = await Order.findOne({ orderNumber });
+      if (!order) {
+        return res.json({ success: false, message: 'Order not found' });
+      }
+
+      // Only update if pending and success response
+      const isSuccess = query.vnp_ResponseCode === '00' && query.vnp_TransactionStatus === '00';
+      if (isSuccess && order.paymentStatus !== 'paid') {
+        order.paymentStatus = 'paid';
+        order.status = 'confirmed';
+        await order.save();
+        await PaymentController.earnRewardsAfterPayment(order);
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          orderId: order.orderNumber,
+          orderDbId: (order._id as any).toString(),
+          paymentStatus: order.paymentStatus,
+          orderStatus: order.status,
+          vnp_ResponseCode: query.vnp_ResponseCode,
+        },
+      });
+    } catch (error: any) {
+      console.error('VNPay return error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message || 'VNPay return error',
+      });
+    }
+  }
+
+  /**
+   * Handle VNPay IPN callback
+   * GET /api/payment/vnpay/callback
+   */
+  static async handleVnpayCallback(req: Request, res: Response) {
+    try {
+      const query = req.query as any as VnpayCallbackData;
+      const isValid = VnpayService.verifyCallback(query);
+      if (!isValid) {
+        return res.status(200).json({ RspCode: '97', Message: 'Invalid signature' });
+      }
+
+      const orderNumber = query.vnp_TxnRef;
+      const order = await Order.findOne({ orderNumber });
+      if (!order) {
+        return res.status(200).json({ RspCode: '01', Message: 'Order not found' });
+      }
+
+      const isSuccess = query.vnp_ResponseCode === '00' && query.vnp_TransactionStatus === '00';
+      if (isSuccess && order.paymentStatus !== 'paid') {
+        order.paymentStatus = 'paid';
+        order.status = 'confirmed';
+        await order.save();
+        await PaymentController.earnRewardsAfterPayment(order);
+      }
+
+      return res.status(200).json({ RspCode: '00', Message: 'Success' });
+    } catch (error: any) {
+      console.error('VNPay callback error:', error);
+      return res.status(200).json({ RspCode: '99', Message: 'Unknown error' });
     }
   }
 

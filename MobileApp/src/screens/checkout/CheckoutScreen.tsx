@@ -332,7 +332,7 @@ export default function CheckoutScreen() {
       });
 
       // Handle payment based on method
-      // Note: Cart will be cleared only after payment is confirmed (for MoMo) or immediately (for cash)
+      // Note: Cart will be cleared only after payment is confirmed (for MoMo/VNPay) or immediately (for cash)
       if (paymentMethod === 'momo') {
         // Always use order.totalAmount from backend (it's the source of truth)
         // Backend calculates totalAmount = finalAmount + shippingFee (after all discounts)
@@ -421,6 +421,68 @@ export default function CheckoutScreen() {
             params: { orderId: order._id },
           });
           
+          throw paymentError;
+        }
+      } else if (paymentMethod === 'vnpay') {
+        const paymentAmount = order.totalAmount;
+        if (!paymentAmount || paymentAmount <= 0) {
+          throw new Error('Số tiền thanh toán không hợp lệ');
+        }
+
+        logger.log('=== CheckoutScreen: Creating VNPay payment ===', {
+          orderId: order._id,
+          paymentAmount,
+          orderTotalAmount: order.totalAmount,
+        });
+
+        try {
+          const paymentResponse = await paymentApi.createVnpayPayment({
+            orderId: order._id,
+            amount: paymentAmount,
+            orderInfo: `Thanh toán đơn hàng ${order.orderNumber}`,
+            returnUrl: 'pharmacyapp://payment-success',
+          });
+
+          if (!paymentResponse.success || !paymentResponse.data?.payUrl) {
+            throw new Error(paymentResponse.message || 'Không thể tạo yêu cầu thanh toán VNPay');
+          }
+
+          const payUrl = paymentResponse.data.payUrl;
+          const opened = await Linking.openURL(payUrl);
+
+          if (!opened) {
+            throw new Error('Không thể mở trang thanh toán VNPay');
+          }
+
+          Toast.show({
+            type: 'success',
+            text1: 'Đặt hàng thành công',
+            text2: `Mã đơn hàng: ${order.orderNumber}. Vui lòng hoàn tất thanh toán VNPay.`,
+          });
+
+          // Điều hướng tới chi tiết đơn để theo dõi trạng thái
+          setTimeout(() => {
+            (navigation as any).navigate('Orders', {
+              screen: 'OrderDetail',
+              params: { orderId: order._id },
+            });
+          }, 2000);
+        } catch (paymentError: any) {
+          const paymentErrorMessage = paymentError.response?.data?.message ||
+                                     paymentError.message ||
+                                     'Không thể tạo yêu cầu thanh toán VNPay';
+
+          Toast.show({
+            type: 'error',
+            text1: 'Lỗi thanh toán VNPay',
+            text2: paymentErrorMessage,
+          });
+
+          (navigation as any).navigate('Orders', {
+            screen: 'OrderDetail',
+            params: { orderId: order._id },
+          });
+
           throw paymentError;
         }
       } else {

@@ -9,5 +9,10 @@ router.post('/momo/create', PaymentController.createMomoPayment);
 router.post('/momo/callback', PaymentController.handleMomoCallback);
 router.get('/momo/status/:orderId', PaymentController.getPaymentStatus);
 
+// VNPay payment routes
+router.post('/vnpay/create', PaymentController.createVnpayPayment);
+router.get('/vnpay/return', PaymentController.handleVnpayReturn);
+router.get('/vnpay/callback', PaymentController.handleVnpayCallback);
+
 export default router;
 

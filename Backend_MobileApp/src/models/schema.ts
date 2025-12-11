@@ -242,7 +242,7 @@ export interface IOrder extends Document {
   couponCode?: string;
   shippingAddress: string;
   shippingPhone: string;
-  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'momo' | 'zalopay';
+  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'momo' | 'zalopay' | 'vnpay';
   paymentStatus: 'pending' | 'paid' | 'failed' | 'refunded';
   momoOrderId?: string; // MoMo's orderId (used for querying payment status)
   momoRequestId?: string; // MoMo's requestId (used for querying payment status)
@@ -298,7 +298,7 @@ const orderSchema = new Schema<IOrder>({
   },
   paymentMethod: {
     type: String,
-    enum: ['cash', 'card', 'bank_transfer', 'momo', 'zalopay'],
+    enum: ['cash', 'card', 'bank_transfer', 'momo', 'zalopay', 'vnpay'],
     required: true,
   },
   paymentStatus: {

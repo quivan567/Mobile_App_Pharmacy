@@ -23,6 +23,12 @@ const paymentMethods: PaymentMethod[] = [
     icon: 'phone-portrait-outline',
     description: 'Thanh toán qua ví điện tử MoMo',
   },
+  {
+    id: 'vnpay',
+    name: 'VNPay',
+    icon: 'card-outline',
+    description: 'Thanh toán qua cổng VNPay',
+  },
 ];
 
 interface PaymentMethodSelectorProps {
