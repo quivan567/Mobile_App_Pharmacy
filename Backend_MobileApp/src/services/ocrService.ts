@@ -20,7 +20,9 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
   try {
     console.log('🔍 Starting OCR for image:', imagePath);
     
-    const { data: { text, confidence } } = await Tesseract.recognize(
+    // Add timeout wrapper for OCR process (max 60 seconds)
+    const OCR_TIMEOUT = 60000;
+    const ocrPromise = Tesseract.recognize(
       imagePath,
       'vie+eng', // Vietnamese and English
       {
@@ -35,13 +37,40 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
       }
     );
     
+    // Race between OCR and timeout
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('OCR timeout: Quá trình nhận dạng văn bản mất quá nhiều thời gian'));
+      }, OCR_TIMEOUT);
+    });
+    
+    const { data: { text, confidence } } = await Promise.race([ocrPromise, timeoutPromise]);
+    
     console.log(`✅ OCR completed. Confidence: ${confidence?.toFixed(2)}%`);
     console.log(`📝 Extracted text length: ${text.length} characters`);
     
     return text;
   } catch (error: any) {
-    console.error('❌ OCR Error:', error.message);
-    throw new Error(`Failed to extract text from image: ${error.message}`);
+    console.error('❌ OCR Error:', {
+      message: error?.message,
+      name: error?.name,
+      stack: error?.stack,
+    });
+    
+    // Handle specific OCR errors
+    if (error?.message?.includes('timeout')) {
+      throw new Error('Quá trình nhận dạng văn bản mất quá nhiều thời gian. Vui lòng thử lại với ảnh nhỏ hơn hoặc rõ hơn.');
+    }
+    
+    if (error?.message?.includes('Image too small') || error?.message?.includes('scale')) {
+      throw new Error('Ảnh quá nhỏ hoặc không đủ chất lượng để nhận dạng. Vui lòng chụp lại ảnh với độ phân giải cao hơn.');
+    }
+    
+    if (error?.message?.includes('ENOENT') || error?.message?.includes('not found')) {
+      throw new Error('Không tìm thấy file ảnh. Vui lòng tải lại ảnh.');
+    }
+    
+    throw new Error(`Không thể đọc nội dung từ ảnh: ${error?.message || 'Lỗi không xác định'}`);
   }
 }
 

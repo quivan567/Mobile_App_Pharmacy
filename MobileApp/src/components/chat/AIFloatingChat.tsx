@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { chatApi, ChatMessage } from '../../api/chat';
 import { COLORS } from '../../utils/constants';
 import Toast from 'react-native-toast-message';
@@ -34,6 +35,7 @@ const initialAssistantMessage: Message = {
 };
 
 export function AIFloatingChat() {
+  const insets = useSafeAreaInsets();
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([initialAssistantMessage]);
   const [input, setInput] = useState('');
@@ -195,7 +197,7 @@ export function AIFloatingChat() {
               behavior={Platform.OS === 'ios' ? 'padding' : undefined}
               keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
             >
-              <View style={styles.inputRow}>
+              <View style={[styles.inputRow, { paddingBottom: Math.max(insets.bottom, 14) }]}>
                 <TouchableOpacity onPress={pickImage} style={styles.iconButton} disabled={isSending}>
                   <Ionicons name="image" size={22} color={COLORS.primary} />
                 </TouchableOpacity>

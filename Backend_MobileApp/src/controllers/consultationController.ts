@@ -1095,10 +1095,35 @@ export const analyzePrescription = async (req: Request, res: Response) => {
       analysisResult = await performAIAnalysis(prescriptionText, imagePath);
       analysisResult = await enrichAnalysisResult(analysisResult);
     } catch (aiError: any) {
-      console.error('performAIAnalysis error:', aiError?.message || aiError);
-      return res.status(500).json({
+      console.error('performAIAnalysis error:', {
+        message: aiError?.message,
+        stack: aiError?.stack,
+        name: aiError?.name,
+        code: aiError?.code,
+      });
+      
+      // Determine error type and return appropriate message
+      let errorMessage = 'Không thể phân tích đơn thuốc. Vui lòng thử lại.';
+      let statusCode = 500;
+      
+      if (aiError?.message?.includes('timeout') || aiError?.code === 'ECONNABORTED') {
+        errorMessage = 'Quá trình phân tích mất quá nhiều thời gian. Vui lòng thử lại với ảnh rõ hơn.';
+        statusCode = 408; // Request Timeout
+      } else if (aiError?.message?.includes('network') || aiError?.code === 'ENOTFOUND' || aiError?.code === 'ECONNREFUSED') {
+        errorMessage = 'Lỗi kết nối mạng. Vui lòng kiểm tra kết nối và thử lại.';
+        statusCode = 503; // Service Unavailable
+      } else if (aiError?.message?.includes('Image') || aiError?.message?.includes('image')) {
+        errorMessage = 'Không thể xử lý ảnh. Vui lòng tải lại ảnh đơn thuốc với chất lượng tốt hơn.';
+        statusCode = 400; // Bad Request
+      } else if (aiError?.message?.includes('OCR') || aiError?.message?.includes('extract')) {
+        errorMessage = 'Không thể đọc nội dung từ ảnh. Vui lòng chụp lại ảnh rõ hơn.';
+        statusCode = 400; // Bad Request
+      }
+      
+      return res.status(statusCode).json({
         success: false,
-        message: 'Không thể phân tích đơn thuốc. Vui lòng thử lại hoặc tải lại ảnh đơn thuốc.',
+        message: errorMessage,
+        error: process.env.NODE_ENV === 'development' ? aiError?.message : undefined,
       });
     }
 
@@ -1220,11 +1245,36 @@ export const analyzePrescription = async (req: Request, res: Response) => {
         orderItems, // Items ready to create order (for Backend_MobileApp - additional feature)
       },
     });
-  } catch (error) {
-    console.error('Prescription analysis error:', error);
-    res.status(500).json({
+  } catch (error: any) {
+    console.error('Prescription analysis error:', {
+      message: error?.message,
+      stack: error?.stack,
+      name: error?.name,
+      code: error?.code,
+    });
+    
+    // Determine error type and return appropriate message
+    let errorMessage = 'Đã xảy ra lỗi khi phân tích đơn thuốc. Vui lòng thử lại.';
+    let statusCode = 500;
+    
+    if (error?.message?.includes('timeout') || error?.code === 'ECONNABORTED') {
+      errorMessage = 'Quá trình phân tích mất quá nhiều thời gian. Vui lòng thử lại.';
+      statusCode = 408;
+    } else if (error?.message?.includes('network') || error?.code === 'ENOTFOUND' || error?.code === 'ECONNREFUSED') {
+      errorMessage = 'Lỗi kết nối mạng. Vui lòng kiểm tra kết nối và thử lại.';
+      statusCode = 503;
+    } else if (error?.message?.includes('Image') || error?.message?.includes('image') || error?.message?.includes('Ảnh')) {
+      errorMessage = error?.message || 'Không thể xử lý ảnh. Vui lòng tải lại ảnh đơn thuốc.';
+      statusCode = 400;
+    } else if (error?.message?.includes('OCR') || error?.message?.includes('extract') || error?.message?.includes('đọc')) {
+      errorMessage = error?.message || 'Không thể đọc nội dung từ ảnh. Vui lòng chụp lại ảnh rõ hơn.';
+      statusCode = 400;
+    }
+    
+    res.status(statusCode).json({
       success: false,
-      message: 'Internal server error',
+      message: errorMessage,
+      error: process.env.NODE_ENV === 'development' ? error?.message : undefined,
     });
   }
 };

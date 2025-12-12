@@ -48,7 +48,7 @@ export async function generatePrescriptionAdviceWithGemini(
         ],
       },
       {
-        timeout: 15000,
+        timeout: 45000, // Increased from 15s to 45s to handle slower responses
       }
     );
 
