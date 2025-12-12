@@ -1093,7 +1093,18 @@ export const analyzePrescription = async (req: Request, res: Response) => {
     let analysisResult;
     try {
       analysisResult = await performAIAnalysis(prescriptionText, imagePath);
-      analysisResult = await enrichAnalysisResult(analysisResult);
+      
+      // Enrich analysis result separately to avoid crashing if enrichment fails
+      try {
+        analysisResult = await enrichAnalysisResult(analysisResult);
+      } catch (enrichError: any) {
+        console.warn('⚠️ Error enriching analysis result (continuing with basic result):', {
+          message: enrichError?.message,
+          name: enrichError?.name,
+        });
+        // Continue with basic analysis result if enrichment fails
+        // This ensures the request still succeeds even if Gemini API fails
+      }
     } catch (aiError: any) {
       console.error('performAIAnalysis error:', {
         message: aiError?.message,
@@ -1174,46 +1185,55 @@ export const analyzePrescription = async (req: Request, res: Response) => {
     }
 
     // If prescription exists (from database or newly saved), save analysis result
+    // Wrap in try-catch to avoid crashing the request if save fails
     if (prescription) {
-      prescription.notes = prescription.notes || '';
-      // Store analysis result in notes or create a separate field
-      // For now, we'll add it to notes
-      if (analysisResult.foundMedicines && analysisResult.foundMedicines.length > 0) {
-        const medicinesList = analysisResult.foundMedicines
-          .map((m: any) => `${m.productName} (x${m.quantity || 1})`)
-          .join(', ');
-        prescription.notes = `${prescription.notes}\n[AI Analysis] Tìm thấy: ${medicinesList}`.trim();
-      }
-      
-      // Save suggested medicines from notFoundMedicines
-      if (analysisResult.notFoundMedicines && analysisResult.notFoundMedicines.length > 0) {
-        const allSuggestions: any[] = [];
-        analysisResult.notFoundMedicines.forEach((notFound: any) => {
-          if (notFound.suggestions && Array.isArray(notFound.suggestions)) {
-            notFound.suggestions.forEach((suggestion: any) => {
-              // Avoid duplicates by checking productId
-              if (!allSuggestions.find(s => s.productId === String(suggestion.productId))) {
-                allSuggestions.push({
-                  productId: String(suggestion.productId),
-                  productName: suggestion.productName,
-                  price: suggestion.price,
-                  unit: suggestion.unit,
-                  confidence: suggestion.confidence,
-                  matchReason: suggestion.matchReason,
-                  originalText: notFound.originalText,
-                });
-              }
-            });
-          }
-        });
-        
-        if (allSuggestions.length > 0) {
-          prescription.suggestedMedicines = allSuggestions;
-          console.log(`Saved ${allSuggestions.length} suggested medicines to prescription`);
+      try {
+        prescription.notes = prescription.notes || '';
+        // Store analysis result in notes or create a separate field
+        // For now, we'll add it to notes
+        if (analysisResult.foundMedicines && analysisResult.foundMedicines.length > 0) {
+          const medicinesList = analysisResult.foundMedicines
+            .map((m: any) => `${m.productName} (x${m.quantity || 1})`)
+            .join(', ');
+          prescription.notes = `${prescription.notes}\n[AI Analysis] Tìm thấy: ${medicinesList}`.trim();
         }
+        
+        // Save suggested medicines from notFoundMedicines
+        if (analysisResult.notFoundMedicines && analysisResult.notFoundMedicines.length > 0) {
+          const allSuggestions: any[] = [];
+          analysisResult.notFoundMedicines.forEach((notFound: any) => {
+            if (notFound.suggestions && Array.isArray(notFound.suggestions)) {
+              notFound.suggestions.forEach((suggestion: any) => {
+                // Avoid duplicates by checking productId
+                if (!allSuggestions.find(s => s.productId === String(suggestion.productId))) {
+                  allSuggestions.push({
+                    productId: String(suggestion.productId),
+                    productName: suggestion.productName,
+                    price: suggestion.price,
+                    unit: suggestion.unit,
+                    confidence: suggestion.confidence,
+                    matchReason: suggestion.matchReason,
+                    originalText: notFound.originalText,
+                  });
+                }
+              });
+            }
+          });
+          
+          if (allSuggestions.length > 0) {
+            prescription.suggestedMedicines = allSuggestions;
+            console.log(`Saved ${allSuggestions.length} suggested medicines to prescription`);
+          }
+        }
+        
+        await prescription.save();
+      } catch (saveError: any) {
+        console.warn('⚠️ Error saving analysis result to prescription (continuing with response):', {
+          message: saveError?.message,
+          name: saveError?.name,
+        });
+        // Don't fail the request if save fails - analysis result is still valid
       }
-      
-      await prescription.save();
     }
 
     // Format response for frontend - include items ready for order creation

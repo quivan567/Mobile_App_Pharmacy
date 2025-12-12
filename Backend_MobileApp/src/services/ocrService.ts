@@ -22,34 +22,62 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
     
     // Add timeout wrapper for OCR process (max 60 seconds)
     const OCR_TIMEOUT = 60000;
-    const ocrPromise = Tesseract.recognize(
-      imagePath,
-      'vie+eng', // Vietnamese and English
-      {
-        logger: (m) => {
-          if (m.status === 'recognizing text') {
-            const progress = Math.round(m.progress * 100);
-            if (progress % 25 === 0) { // Log every 25%
-              console.log(`OCR Progress: ${progress}%`);
+    
+    // Suppress console warnings from Tesseract about image size (they're non-fatal)
+    const originalConsoleWarn = console.warn;
+    const suppressedWarnings: string[] = [];
+    console.warn = (...args: any[]) => {
+      const message = args.join(' ');
+      // Suppress "Image too small to scale" warnings - they're non-fatal
+      if (message.includes('Image too small') || message.includes('too small to scale')) {
+        suppressedWarnings.push(message);
+        return; // Don't log these warnings
+      }
+      originalConsoleWarn.apply(console, args);
+    };
+    
+    try {
+      const ocrPromise = Tesseract.recognize(
+        imagePath,
+        'vie+eng', // Vietnamese and English
+        {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              const progress = Math.round(m.progress * 100);
+              if (progress % 25 === 0) { // Log every 25%
+                console.log(`OCR Progress: ${progress}%`);
+              }
             }
           }
         }
+      );
+      
+      // Race between OCR and timeout
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('OCR timeout: Quá trình nhận dạng văn bản mất quá nhiều thời gian'));
+        }, OCR_TIMEOUT);
+      });
+      
+      const { data: { text, confidence } } = await Promise.race([ocrPromise, timeoutPromise]);
+      
+      // Restore original console.warn
+      console.warn = originalConsoleWarn;
+      
+      // Log suppressed warnings if any (for debugging, but don't fail)
+      if (suppressedWarnings.length > 0) {
+        console.log('ℹ️ OCR warnings suppressed (non-fatal):', suppressedWarnings.length, 'warnings');
       }
-    );
-    
-    // Race between OCR and timeout
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(new Error('OCR timeout: Quá trình nhận dạng văn bản mất quá nhiều thời gian'));
-      }, OCR_TIMEOUT);
-    });
-    
-    const { data: { text, confidence } } = await Promise.race([ocrPromise, timeoutPromise]);
-    
-    console.log(`✅ OCR completed. Confidence: ${confidence?.toFixed(2)}%`);
-    console.log(`📝 Extracted text length: ${text.length} characters`);
-    
-    return text;
+      
+      console.log(`✅ OCR completed. Confidence: ${confidence?.toFixed(2)}%`);
+      console.log(`📝 Extracted text length: ${text.length} characters`);
+      
+      return text;
+    } catch (ocrError: any) {
+      // Restore original console.warn in case of error
+      console.warn = originalConsoleWarn;
+      throw ocrError;
+    }
   } catch (error: any) {
     console.error('❌ OCR Error:', {
       message: error?.message,
