@@ -12,7 +12,8 @@ import {
   parseMedicineName,
   normalizeDosageForComparison,
 } from '../services/medicineMatchingService.js';
-import { generatePrescriptionAdviceWithGemini } from '../services/geminiService.js';
+// Gemini API disabled for prescription analysis
+// import { generatePrescriptionAdviceWithGemini } from '../services/geminiService.js';
 import { StockService } from '../services/stockService.js';
 
 // Helpers ported from web consultation controller for richer matching/explanations
@@ -1463,15 +1464,13 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
       
       // Check if file exists
       if (fs.existsSync(prescriptionImage)) {
-        // Extract text from image
-        const ocrText = await extractTextFromImage(prescriptionImage);
-        prescriptionText = ocrText;
-        
-        // Extract prescription info (customer name, doctor, hospital, etc.)
-        extractedInfo = extractPrescriptionInfo(ocrText);
+        // Use processPrescriptionImage to get OCR + Gemini correction + extract info
+        // This will automatically use Gemini if available
+        extractedInfo = await processPrescriptionImage(prescriptionImage);
+        prescriptionText = extractedInfo.rawText;
         
         // Only add note if OCR was successful - no need for technical details
-        console.log('✅ OCR completed. Extracted text length:', ocrText.length);
+        console.log('✅ OCR completed. Extracted text length:', prescriptionText.length);
       } else {
         console.warn('⚠️ Image file not found:', prescriptionImage);
         analysisNotes.push('⚠️ Không thể đọc được ảnh đơn thuốc');
@@ -2010,25 +2009,32 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
     }
   }
 
-  // Step 3: Optional Gemini call to generate higher–level advice
+  // Step 3: Gemini API disabled - removed to avoid dependency on external AI service
+  // Analysis now relies solely on OCR + database matching for faster and more reliable results
+  // If you want to re-enable Gemini, uncomment the code below and the import at the top
+  /*
   try {
-    const geminiResult = await generatePrescriptionAdviceWithGemini({
+    const geminiPromise = generatePrescriptionAdviceWithGemini({
       prescriptionText,
       foundMedicines,
       notFoundMedicines,
       extractedInfo,
     });
+    
+    const timeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), 10000);
+    });
+    
+    const geminiResult = await Promise.race([geminiPromise, timeoutPromise]);
 
     if (geminiResult) {
       if (geminiResult.summary) {
-        // Tinh gọn: chỉ lấy phần tóm tắt ngắn gọn
         const shortSummary = geminiResult.summary.length > 100 
           ? geminiResult.summary.substring(0, 100) + '...' 
           : geminiResult.summary;
         analysisNotes.push(`🤖 ${shortSummary}`);
       }
       if (Array.isArray(geminiResult.safetyNotes)) {
-        // Chỉ lấy 2 lưu ý quan trọng nhất
         geminiResult.safetyNotes.slice(0, 2).forEach((note) => {
           if (typeof note === 'string' && note.trim()) {
             const shortNote = note.trim().length > 80 
@@ -2039,7 +2045,6 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
         });
       }
       if (Array.isArray(geminiResult.recommendations)) {
-        // Chỉ lấy 1 gợi ý quan trọng nhất
         if (geminiResult.recommendations.length > 0) {
           const rec = geminiResult.recommendations[0];
           if (typeof rec === 'string' && rec.trim()) {
@@ -2050,12 +2055,12 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
           }
         }
       }
-      // Boost overall confidence slightly if Gemini ran successfully
       confidence = Math.min(0.98, confidence + 0.05);
     }
   } catch (geminiError: any) {
     console.error('Gemini analysis error (non‑blocking):', geminiError?.message || geminiError);
   }
+  */
 
   // Fallback: nếu không trích xuất được thuốc nào nhưng vẫn có rawText,
   // thử thêm một lượt đơn giản trên rawText để lấy các dòng có chứa liều lượng.
@@ -2234,9 +2239,7 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
     analysisNotes,
     confidence,
     analysisTimestamp: new Date(),
-    aiModel: process.env.GEMINI_MODEL
-      ? `pharmacy-v2.0-ocr+${process.env.GEMINI_MODEL}`
-      : 'pharmacy-v2.0-ocr',
+    aiModel: 'pharmacy-v2.0-ocr', // Gemini disabled - using OCR + database matching only
     extractedInfo // Customer name, doctor, hospital, etc. from OCR
   };
 }

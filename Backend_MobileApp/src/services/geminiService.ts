@@ -48,7 +48,7 @@ export async function generatePrescriptionAdviceWithGemini(
         ],
       },
       {
-        timeout: 45000, // Increased from 15s to 45s to handle slower responses
+        timeout: 10000, // Reduced to 10s to avoid blocking response - analysis can continue without Gemini
       }
     );
 
@@ -69,11 +69,37 @@ export async function generatePrescriptionAdviceWithGemini(
       };
     }
   } catch (error: any) {
-    console.error('[Gemini] Error calling Gemini API:', {
+    const status = error?.response?.status;
+    const errorData = error?.response?.data;
+    
+    // Handle specific error cases
+    if (status === 503) {
+      // Model is overloaded - this is expected and non-fatal
+      console.warn('[Gemini] Model is overloaded (503) - continuing without Gemini advice');
+      return null;
+    }
+    
+    if (status === 429) {
+      // Rate limit exceeded
+      console.warn('[Gemini] Rate limit exceeded (429) - continuing without Gemini advice');
+      return null;
+    }
+    
+    if (status === 400) {
+      // Bad request - likely invalid API key or malformed request
+      console.warn('[Gemini] Bad request (400) - check API key and request format');
+      return null;
+    }
+    
+    // Log other errors for debugging
+    console.warn('[Gemini] Error calling Gemini API (non-fatal):', {
       message: error?.message,
-      status: error?.response?.status,
-      data: error?.response?.data,
+      status: status,
+      errorCode: errorData?.error?.code,
+      errorMessage: errorData?.error?.message,
     });
+    
+    // Always return null on error - analysis continues without Gemini
     return null;
   }
 }

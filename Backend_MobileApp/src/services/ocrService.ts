@@ -665,6 +665,169 @@ export function extractPrescriptionInfo(ocrText: string): ExtractedPrescriptionI
 }
 
 /**
+ * Use Gemini AI to correct OCR text and extract structured information
+ */
+async function correctOCRWithGemini(ocrText: string): Promise<string | null> {
+  try {
+    // Check if Gemini is available
+    if (!process.env.GEMINI_API_KEY) {
+      return null;
+    }
+
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    const model = genAI.getGenerativeModel({ model: modelName });
+
+    const prompt = `Bạn là chuyên gia xử lý văn bản tiếng Việt từ OCR. Nhiệm vụ của bạn là sửa lỗi OCR và trả về văn bản chính xác.
+
+Văn bản OCR gốc (có thể có lỗi):
+${ocrText}
+
+Yêu cầu:
+1. Sửa các lỗi OCR phổ biến (ví dụ: "HUYNH" -> "HUỲNH", "Nguyễn Tha" -> "Nguyễn Thanh Hải")
+2. Khôi phục dấu tiếng Việt chính xác
+3. Giữ nguyên cấu trúc và định dạng của văn bản
+4. Đảm bảo tên người, tên bệnh viện, chẩn đoán được viết đúng
+5. Không thêm hoặc bớt thông tin, chỉ sửa lỗi
+
+Trả về văn bản đã được sửa chữa:`;
+
+    // Add timeout (10 seconds) to avoid blocking
+    const timeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), 10000);
+    });
+    
+    const geminiPromise = model.generateContent(prompt).then(result => {
+      const response = result.response;
+      return response.text();
+    });
+    
+    const correctedText = await Promise.race([geminiPromise, timeoutPromise]);
+
+    if (correctedText && correctedText.trim().length > 0) {
+      console.log('✅ Gemini OCR correction completed');
+      return correctedText.trim();
+    }
+
+    return null;
+  } catch (error: any) {
+    console.error('❌ Gemini OCR correction error:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Use Gemini AI to extract structured prescription information
+ */
+async function extractInfoWithGemini(ocrText: string, imagePath?: string): Promise<Partial<ExtractedPrescriptionInfo> | null> {
+  try {
+    // Check if Gemini is available
+    if (!process.env.GEMINI_API_KEY) {
+      return null;
+    }
+
+    const { GoogleGenerativeAI } = await import('@google/generative-ai');
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    const model = genAI.getGenerativeModel({ model: modelName });
+
+    let prompt = '';
+    let parts: any[] = [];
+
+    // If imagePath is provided, use vision API to "see" the image directly
+    if (imagePath && fs.existsSync(imagePath)) {
+      const imageData = fs.readFileSync(imagePath);
+      const base64Image = imageData.toString('base64');
+      const mimeType = imagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+      
+      prompt = `Bạn là chuyên gia trích xuất thông tin từ đơn thuốc tiếng Việt. Hãy "nhìn" vào ảnh đơn thuốc và trích xuất thông tin sau:
+
+Hãy trích xuất và trả về JSON với các trường sau (chỉ trả về JSON, không có text khác):
+{
+  "customerName": "Tên đầy đủ của bệnh nhân (viết hoa, có dấu đầy đủ)",
+  "doctorName": "Tên đầy đủ của bác sĩ (có dấu đầy đủ)",
+  "hospitalName": "Tên đầy đủ của bệnh viện/phòng khám (viết hoa, có dấu đầy đủ)",
+  "examinationDate": "Ngày khám (format: YYYY-MM-DD)",
+  "diagnosis": "Chẩn đoán đầy đủ (có dấu đầy đủ)"
+}
+
+Lưu ý:
+- Tên phải có dấu tiếng Việt đầy đủ và chính xác
+- Chẩn đoán phải đầy đủ, không bị cắt ngắn
+- Ngày tháng phải đúng format YYYY-MM-DD`;
+
+      parts = [
+        {
+          inlineData: {
+            data: base64Image,
+            mimeType: mimeType
+          }
+        },
+        { text: prompt }
+      ];
+      
+      console.log('🔍 Using Gemini Vision API to extract info directly from image...');
+    } else {
+      // Fallback to text-only extraction
+      prompt = `Bạn là chuyên gia trích xuất thông tin từ đơn thuốc tiếng Việt. Hãy trích xuất thông tin sau từ văn bản OCR:
+
+Văn bản OCR:
+${ocrText}
+
+Hãy trích xuất và trả về JSON với các trường sau (chỉ trả về JSON, không có text khác):
+{
+  "customerName": "Tên đầy đủ của bệnh nhân (viết hoa, có dấu đầy đủ)",
+  "doctorName": "Tên đầy đủ của bác sĩ (có dấu đầy đủ)",
+  "hospitalName": "Tên đầy đủ của bệnh viện/phòng khám (viết hoa, có dấu đầy đủ)",
+  "examinationDate": "Ngày khám (format: YYYY-MM-DD)",
+  "diagnosis": "Chẩn đoán đầy đủ (có dấu đầy đủ)"
+}
+
+Lưu ý:
+- Tên phải có dấu tiếng Việt đầy đủ và chính xác
+- Chẩn đoán phải đầy đủ, không bị cắt ngắn
+- Ngày tháng phải đúng format YYYY-MM-DD`;
+
+      parts = [{ text: prompt }];
+    }
+
+    // Add timeout (10 seconds) to avoid blocking
+    const timeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => resolve(null), 10000);
+    });
+    
+    const geminiPromise = model.generateContent(parts).then(result => {
+      const response = result.response;
+      return response.text();
+    });
+    
+    const responseText = await Promise.race([geminiPromise, timeoutPromise]);
+    
+    if (!responseText) {
+      console.warn('⚠️ Gemini extraction timeout or failed');
+      return null;
+    }
+
+    // Extract JSON from response
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const extractedInfo = JSON.parse(jsonMatch[0]);
+      console.log('✅ Gemini extracted structured info');
+      if (imagePath) {
+        console.log('   📸 Extracted from image using Vision API');
+      }
+      return extractedInfo;
+    }
+
+    return null;
+  } catch (error: any) {
+    console.error('❌ Gemini extraction error:', error.message);
+    return null;
+  }
+}
+
+/**
  * Process prescription image: OCR + extract info
  */
 export async function processPrescriptionImage(imagePathOrBase64: string): Promise<ExtractedPrescriptionInfo> {
@@ -691,7 +854,17 @@ export async function processPrescriptionImage(imagePathOrBase64: string): Promi
       fs.writeFileSync(imagePath, buffer);
       
       // Extract text
-      const ocrText = await extractTextFromImage(imagePath);
+      let ocrText = await extractTextFromImage(imagePath);
+      
+      // Try to correct OCR with Gemini AI
+      const correctedText = await correctOCRWithGemini(ocrText);
+      if (correctedText) {
+        console.log('✅ Using Gemini-corrected OCR text');
+        ocrText = correctedText;
+      }
+      
+      // Try to extract structured info with Gemini (pass imagePath for Vision API)
+      const geminiInfo = await extractInfoWithGemini(ocrText, imagePath);
       
       // Clean up temp file
       try {
@@ -700,8 +873,34 @@ export async function processPrescriptionImage(imagePathOrBase64: string): Promi
         console.error('Error deleting temp file:', error);
       }
       
-      // Extract info
-      return extractPrescriptionInfo(ocrText);
+      // Extract info using pattern matching
+      const extractedInfo = extractPrescriptionInfo(ocrText);
+      
+      // Merge Gemini results (prioritize Gemini if available and more complete)
+      if (geminiInfo) {
+        if (geminiInfo.customerName && geminiInfo.customerName.length > (extractedInfo.customerName?.length || 0)) {
+          extractedInfo.customerName = geminiInfo.customerName;
+          console.log('✅ Using Gemini-extracted customer name:', extractedInfo.customerName);
+        }
+        if (geminiInfo.doctorName && geminiInfo.doctorName.length > (extractedInfo.doctorName?.length || 0)) {
+          extractedInfo.doctorName = geminiInfo.doctorName;
+          console.log('✅ Using Gemini-extracted doctor name:', extractedInfo.doctorName);
+        }
+        if (geminiInfo.hospitalName && geminiInfo.hospitalName.length > (extractedInfo.hospitalName?.length || 0)) {
+          extractedInfo.hospitalName = geminiInfo.hospitalName;
+          console.log('✅ Using Gemini-extracted hospital name:', extractedInfo.hospitalName);
+        }
+        if (geminiInfo.diagnosis && geminiInfo.diagnosis.length > (extractedInfo.diagnosis?.length || 0)) {
+          extractedInfo.diagnosis = geminiInfo.diagnosis;
+          console.log('✅ Using Gemini-extracted diagnosis:', extractedInfo.diagnosis);
+        }
+        if (geminiInfo.examinationDate) {
+          extractedInfo.examinationDate = geminiInfo.examinationDate;
+          console.log('✅ Using Gemini-extracted examination date:', extractedInfo.examinationDate);
+        }
+      }
+      
+      return extractedInfo;
     }
   }
   
@@ -710,7 +909,45 @@ export async function processPrescriptionImage(imagePathOrBase64: string): Promi
     throw new Error('Image file not found');
   }
   
-  const ocrText = await extractTextFromImage(imagePath);
-  return extractPrescriptionInfo(ocrText);
+  let ocrText = await extractTextFromImage(imagePath);
+  
+  // Try to correct OCR with Gemini AI
+  const correctedText = await correctOCRWithGemini(ocrText);
+  if (correctedText) {
+    console.log('✅ Using Gemini-corrected OCR text');
+    ocrText = correctedText;
+  }
+  
+  // Try to extract structured info with Gemini (pass imagePath for Vision API)
+  const geminiInfo = await extractInfoWithGemini(ocrText, imagePath);
+  
+  // Extract info using pattern matching
+  const extractedInfo = extractPrescriptionInfo(ocrText);
+  
+  // Merge Gemini results (prioritize Gemini if available and more complete)
+  if (geminiInfo) {
+    if (geminiInfo.customerName && geminiInfo.customerName.length > (extractedInfo.customerName?.length || 0)) {
+      extractedInfo.customerName = geminiInfo.customerName;
+      console.log('✅ Using Gemini-extracted customer name:', extractedInfo.customerName);
+    }
+    if (geminiInfo.doctorName && geminiInfo.doctorName.length > (extractedInfo.doctorName?.length || 0)) {
+      extractedInfo.doctorName = geminiInfo.doctorName;
+      console.log('✅ Using Gemini-extracted doctor name:', extractedInfo.doctorName);
+    }
+    if (geminiInfo.hospitalName && geminiInfo.hospitalName.length > (extractedInfo.hospitalName?.length || 0)) {
+      extractedInfo.hospitalName = geminiInfo.hospitalName;
+      console.log('✅ Using Gemini-extracted hospital name:', extractedInfo.hospitalName);
+    }
+    if (geminiInfo.diagnosis && geminiInfo.diagnosis.length > (extractedInfo.diagnosis?.length || 0)) {
+      extractedInfo.diagnosis = geminiInfo.diagnosis;
+      console.log('✅ Using Gemini-extracted diagnosis:', extractedInfo.diagnosis);
+    }
+    if (geminiInfo.examinationDate) {
+      extractedInfo.examinationDate = geminiInfo.examinationDate;
+      console.log('✅ Using Gemini-extracted examination date:', extractedInfo.examinationDate);
+    }
+  }
+  
+  return extractedInfo;
 }
 

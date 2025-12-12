@@ -366,11 +366,19 @@ export const consultationApi = {
       console.log('Request headers:', headers);
       
       // Use fetch API for FormData upload in React Native
-      const response = await fetch(`${API_BASE_URL}/api/consultation/analyze`, {
-        method: 'POST',
-        headers,
-        body: formData,
-      });
+      // Set timeout to 120 seconds (2 minutes) for OCR + analysis
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 seconds
+      
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/consultation/analyze`, {
+          method: 'POST',
+          headers,
+          body: formData,
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
       
       console.log('Response status:', response.status);
       console.log('Response ok:', response.ok);
@@ -381,14 +389,21 @@ export const consultationApi = {
         throw new Error(errorData.message || `HTTP ${response.status}`);
       }
       
-      const responseData = await response.json();
-      console.log('Response data:', responseData);
-      
-      return {
-        success: responseData.success,
-        data: responseData.data,
-        message: responseData.message,
-      };
+        const responseData = await response.json();
+        console.log('Response data:', responseData);
+        
+        return {
+          success: responseData.success,
+          data: responseData.data,
+          message: responseData.message,
+        };
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          throw new Error('Quá trình phân tích mất quá nhiều thời gian. Vui lòng thử lại với ảnh rõ hơn.');
+        }
+        throw fetchError;
+      }
     }
     
     // Option 2: Send prescriptionId (image already in database)
