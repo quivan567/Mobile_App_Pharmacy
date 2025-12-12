@@ -20,28 +20,59 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
   try {
     console.log('🔍 Starting OCR for image:', imagePath);
     
+    // Validate image file exists and get size
+    if (!fs.existsSync(imagePath)) {
+      throw new Error('Image file not found');
+    }
+    
+    // Check image file size before processing
+    try {
+      const stats = fs.statSync(imagePath);
+      if (stats.size < 100) { // Less than 100 bytes is likely corrupted
+        throw new Error('Image file is too small or corrupted');
+      }
+      console.log(`📊 Image file size: ${(stats.size / 1024).toFixed(2)} KB`);
+    } catch (statError: any) {
+      throw new Error('Cannot read image file: ' + (statError?.message || 'Unknown error'));
+    }
+    
     // Add timeout wrapper for OCR process (max 60 seconds)
     const OCR_TIMEOUT = 60000;
     
     // Suppress console warnings from Tesseract about image size (they're non-fatal)
     const originalConsoleWarn = console.warn;
     const suppressedWarnings: string[] = [];
+    let hasImageTooSmallWarning = false;
+    
     console.warn = (...args: any[]) => {
       const message = args.join(' ');
       // Suppress "Image too small to scale" warnings - they're non-fatal
       if (message.includes('Image too small') || message.includes('too small to scale')) {
         suppressedWarnings.push(message);
+        hasImageTooSmallWarning = true;
         return; // Don't log these warnings
       }
       originalConsoleWarn.apply(console, args);
     };
     
     try {
+      // Create a promise that can be cancelled
+      let isResolved = false;
+      let ocrWorker: any = null;
+      
       const ocrPromise = Tesseract.recognize(
         imagePath,
         'vie+eng', // Vietnamese and English
         {
           logger: (m) => {
+            // Check for fatal errors early
+            if (m.status === 'error') {
+              if (!isResolved) {
+                isResolved = true;
+                throw new Error(`OCR error: ${m.message || 'Unknown error'}`);
+              }
+            }
+            
             if (m.status === 'recognizing text') {
               const progress = Math.round(m.progress * 100);
               if (progress % 25 === 0) { // Log every 25%
@@ -50,16 +81,37 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
             }
           }
         }
-      );
+      ).then((result: any) => {
+        if (!isResolved) {
+          isResolved = true;
+          return {
+            text: result.data.text,
+            confidence: result.data.confidence || 0
+          };
+        }
+        return {
+          text: result.data.text,
+          confidence: result.data.confidence || 0
+        };
+      }).catch((error: any) => {
+        if (!isResolved) {
+          isResolved = true;
+          throw error;
+        }
+        throw error;
+      });
       
       // Race between OCR and timeout
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => {
-          reject(new Error('OCR timeout: Quá trình nhận dạng văn bản mất quá nhiều thời gian'));
+          if (!isResolved) {
+            isResolved = true;
+            reject(new Error('OCR timeout: Quá trình nhận dạng văn bản mất quá nhiều thời gian'));
+          }
         }, OCR_TIMEOUT);
       });
       
-      const { data: { text, confidence } } = await Promise.race([ocrPromise, timeoutPromise]);
+      const result = await Promise.race([ocrPromise, timeoutPromise]);
       
       // Restore original console.warn
       console.warn = originalConsoleWarn;
@@ -69,10 +121,20 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
         console.log('ℹ️ OCR warnings suppressed (non-fatal):', suppressedWarnings.length, 'warnings');
       }
       
-      console.log(`✅ OCR completed. Confidence: ${confidence?.toFixed(2)}%`);
-      console.log(`📝 Extracted text length: ${text.length} characters`);
+      // If we got "Image too small" warning and extracted text is very short, it's likely a real problem
+      if (hasImageTooSmallWarning && result.text.trim().length < 10) {
+        throw new Error('Ảnh quá nhỏ hoặc không đủ chất lượng để nhận dạng. Vui lòng chụp lại ảnh với độ phân giải cao hơn (tối thiểu 200x200 pixels).');
+      }
       
-      return text;
+      console.log(`✅ OCR completed. Confidence: ${result.confidence?.toFixed(2)}%`);
+      console.log(`📝 Extracted text length: ${result.text.length} characters`);
+      
+      // If extracted text is too short, it might be an error
+      if (result.text.trim().length < 10) {
+        console.warn('⚠️ OCR extracted very little text - image might be too small or unclear');
+      }
+      
+      return result.text;
     } catch (ocrError: any) {
       // Restore original console.warn in case of error
       console.warn = originalConsoleWarn;
@@ -90,12 +152,16 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
       throw new Error('Quá trình nhận dạng văn bản mất quá nhiều thời gian. Vui lòng thử lại với ảnh nhỏ hơn hoặc rõ hơn.');
     }
     
-    if (error?.message?.includes('Image too small') || error?.message?.includes('scale')) {
-      throw new Error('Ảnh quá nhỏ hoặc không đủ chất lượng để nhận dạng. Vui lòng chụp lại ảnh với độ phân giải cao hơn.');
+    if (error?.message?.includes('Image too small') || error?.message?.includes('scale') || error?.message?.includes('too small')) {
+      throw new Error('Ảnh quá nhỏ hoặc không đủ chất lượng để nhận dạng. Vui lòng chụp lại ảnh với độ phân giải cao hơn (tối thiểu 200x200 pixels).');
     }
     
     if (error?.message?.includes('ENOENT') || error?.message?.includes('not found')) {
       throw new Error('Không tìm thấy file ảnh. Vui lòng tải lại ảnh.');
+    }
+    
+    if (error?.message?.includes('corrupted') || error?.message?.includes('too small')) {
+      throw new Error('File ảnh bị hỏng hoặc quá nhỏ. Vui lòng chụp/tải lại ảnh.');
     }
     
     throw new Error(`Không thể đọc nội dung từ ảnh: ${error?.message || 'Lỗi không xác định'}`);

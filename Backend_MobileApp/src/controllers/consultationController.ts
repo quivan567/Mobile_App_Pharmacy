@@ -1473,12 +1473,27 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
         console.log('✅ OCR completed. Extracted text length:', prescriptionText.length);
       } else {
         console.warn('⚠️ Image file not found:', prescriptionImage);
-        analysisNotes.push('⚠️ Không thể đọc được ảnh đơn thuốc');
+        throw new Error('Không tìm thấy file ảnh. Vui lòng tải lại ảnh.');
       }
     } catch (error: any) {
       console.error('❌ OCR Error:', error.message);
+      
+      // For critical errors (timeout, image too small, corrupted), throw to be caught by outer handler
+      if (error?.message?.includes('timeout') || 
+          error?.message?.includes('too small') || 
+          error?.message?.includes('corrupted') ||
+          error?.message?.includes('quá nhỏ') ||
+          error?.message?.includes('mất quá nhiều thời gian')) {
+        throw error; // Re-throw to be caught by analyzePrescription's error handler
+      }
+      
+      // For other errors, add note but continue if we have prescriptionText
       analysisNotes.push('⚠️ Không thể đọc được ảnh đơn thuốc');
-      // Continue with basic analysis even if OCR fails
+      
+      // If no text extracted and no prescriptionText provided, we can't proceed
+      if (!prescriptionText) {
+        throw new Error('Không thể đọc được ảnh đơn thuốc. Vui lòng chụp lại ảnh rõ hơn hoặc nhập thủ công.');
+      }
     }
   }
 
