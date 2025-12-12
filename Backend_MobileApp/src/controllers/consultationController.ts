@@ -1803,9 +1803,19 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
     
     console.log(`✅ Filtered to ${validMedicines.length} valid medicine names (removed ${allMedicineMatches.length - validMedicines.length} invalid patterns)`);
     
-    // Process each valid medicine
-    for (const { text: medicineText, lineIndex } of validMedicines) {
+    // Process each valid medicine in parallel for better performance
+    const processMedicine = async ({ text: medicineText, lineIndex }: { text: string; lineIndex: number }) => {
       console.log(`\n📋 Processing medicine from line ${lineIndex + 1}: "${medicineText}"`);
+      
+      const result: {
+        prescriptionMedicine?: any;
+        foundMedicine?: any;
+        notFoundMedicine?: any;
+        relatedMedicines?: any[];
+        price?: number;
+        notes?: string[];
+        requiresConsultation?: boolean;
+      } = {};
       
       if (medicineText && medicineText.length > 2) {
         // Remove usage instructions
@@ -1828,7 +1838,7 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
         
         if (medicineNameOnly.length < 3 || !/[a-zA-ZÀ-ỹ]{3,}/.test(medicineNameOnly)) {
           console.log(`   ⚠️ Skipped invalid medicine name (too short or no letters): "${medicineNameOnly}"`);
-          continue;
+          return result;
         }
         
         // Clean OCR text
@@ -1846,14 +1856,14 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
           .replace(/:\s*\d+\s*(viên|hộp|chai|gói|lọ|tuýp|tuyp)/gi, '')
           .trim();
         
-        if (cleanMedicineText.length < 2) continue;
+        if (cleanMedicineText.length < 2) return result;
         
         // Add to prescriptionMedicines list
-        prescriptionMedicines.push({
+        result.prescriptionMedicine = {
           originalText: medicineText,
           cleanText: cleanMedicineText,
           quantity: quantity
-        });
+        };
         
         // Step 3: Find exact match using medicine matching service (multi search terms)
         const searchTerms = buildSearchTerms(medicineText, cleanMedicineText);
@@ -1871,73 +1881,66 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
         if (exactMatch && exactMatch.product) {
           const product = exactMatch.product;
 
-          // Skip duplicates by name/active ingredient
-          if (!isMedicineAlreadyInPrescription(product, foundMedicines)) {
-            const originalParsed = parseMedicineName(cleanMedicineText);
-            const productParsed = parseMedicineName(product.name || '');
-            const sameDosage = isSameDosage(originalParsed.dosage, productParsed.dosage);
+          const originalParsed = parseMedicineName(cleanMedicineText);
+          const productParsed = parseMedicineName(product.name || '');
+          const sameDosage = isSameDosage(originalParsed.dosage, productParsed.dosage);
 
-            let matchReason = 'same_name';
-            if (sameDosage) {
-              matchReason = 'same_name_same_dosage';
-            } else if (originalParsed.dosage || productParsed.dosage) {
-              matchReason = 'same_name_different_dosage';
-            }
+          let matchReason = 'same_name';
+          if (sameDosage) {
+            matchReason = 'same_name_same_dosage';
+          } else if (originalParsed.dosage || productParsed.dosage) {
+            matchReason = 'same_name_different_dosage';
+          }
 
-            const activeIngredient = product.activeIngredient || product.genericName;
-            const groupTherapeutic = product.groupTherapeutic;
-            const medicineInfo = await fetchMedicineInfo(product.name || '');
-            const contraindication =
-              (medicineInfo &&
-                (medicineInfo.contraindication ||
-                  medicineInfo.chongChiDinh ||
-                  medicineInfo.contraindications)) ||
-              undefined;
-            const indication =
-              product.indication ||
-              product.description ||
-              (medicineInfo &&
-                (medicineInfo.indication ||
-                  medicineInfo.description ||
-                  medicineInfo.uses ||
-                  medicineInfo.congDung)) ||
-              undefined;
-            const medicineKeyForCheck = normalizeForComparison(product.name || cleanMedicineText);
+          const activeIngredient = product.activeIngredient || product.genericName;
+          const groupTherapeutic = product.groupTherapeutic;
+          const medicineInfo = await fetchMedicineInfo(product.name || '');
+          const contraindication =
+            (medicineInfo &&
+              (medicineInfo.contraindication ||
+                medicineInfo.chongChiDinh ||
+                medicineInfo.contraindications)) ||
+            undefined;
+          const indication =
+            product.indication ||
+            product.description ||
+            (medicineInfo &&
+              (medicineInfo.indication ||
+                medicineInfo.description ||
+                medicineInfo.uses ||
+                medicineInfo.congDung)) ||
+            undefined;
+          const medicineKeyForCheck = normalizeForComparison(product.name || cleanMedicineText);
 
-            if (!foundMedicines.some((m: any) => normalizeForComparison(m.productName || '') === medicineKeyForCheck)) {
-              foundMedicines.push({
-                productId: product._id,
-                productName: product.name,
-                price: product.price,
-                unit: product.unit,
-                inStock: product.inStock,
-                stockQuantity: product.stockQuantity,
-                requiresPrescription: product.isPrescription,
-                confidence: exactMatch.confidence,
-                originalText: medicineText,
-                quantity: quantity,
-                matchType: exactMatch.matchType,
-                matchReason,
-                activeIngredient,
-                groupTherapeutic,
-                contraindication: contraindication || undefined,
-                indication,
-              });
-              totalEstimatedPrice += product.price * quantity;
-              
-              if (product.isPrescription) {
-                if (!analysisNotes.some(note => note.includes('cần đơn bác sĩ'))) {
-                  analysisNotes.push(`⚠️ Một số thuốc cần đơn bác sĩ`);
-                }
-                requiresConsultation = true;
-              }
-              
-              if (product.stockQuantity < 10) {
-                if (!analysisNotes.some(note => note.includes('sắp hết hàng'))) {
-                  analysisNotes.push(`⚠️ Một số thuốc sắp hết hàng`);
-                }
-              }
-            }
+          result.foundMedicine = {
+            productId: product._id,
+            productName: product.name,
+            price: product.price,
+            unit: product.unit,
+            inStock: product.inStock,
+            stockQuantity: product.stockQuantity,
+            requiresPrescription: product.isPrescription,
+            confidence: exactMatch.confidence,
+            originalText: medicineText,
+            quantity: quantity,
+            matchType: exactMatch.matchType,
+            matchReason,
+            activeIngredient,
+            groupTherapeutic,
+            contraindication: contraindication || undefined,
+            indication,
+            medicineKeyForCheck, // For duplicate checking
+          };
+          result.price = product.price * quantity;
+          
+          if (product.isPrescription) {
+            result.notes = [`⚠️ Một số thuốc cần đơn bác sĩ`];
+            result.requiresConsultation = true;
+          }
+          
+          if (product.stockQuantity < 10) {
+            if (!result.notes) result.notes = [];
+            result.notes.push(`⚠️ Một số thuốc sắp hết hàng`);
           }
         } else {
           // Step 4: Find similar medicines for suggestions (increased from 3 to 5)
@@ -1995,18 +1998,67 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
           );
           
           // Always add to notFoundMedicines with suggestions (guaranteed to have at least 1)
-          notFoundMedicines.push({
+          result.notFoundMedicine = {
             originalText: medicineText,
             suggestions
-          });
+          };
           
           // Add to relatedMedicines for overall suggestions
-          relatedMedicines.push(...similarMedicines);
+          result.relatedMedicines = similarMedicines;
           
-          requiresConsultation = true;
+          result.requiresConsultation = true;
         }
       }
+      
+      return result;
+    };
+    
+    // Process all medicines in parallel
+    console.log(`🚀 Processing ${validMedicines.length} medicines in parallel...`);
+    const medicineResults = await Promise.all(
+      validMedicines.map(processMedicine)
+    );
+    
+    // Aggregate results
+    const seenMedicineKeys = new Set<string>();
+    for (const result of medicineResults) {
+      if (result.prescriptionMedicine) {
+        prescriptionMedicines.push(result.prescriptionMedicine);
+      }
+      
+      if (result.foundMedicine) {
+        // Check for duplicates
+        if (!seenMedicineKeys.has(result.foundMedicine.medicineKeyForCheck)) {
+          seenMedicineKeys.add(result.foundMedicine.medicineKeyForCheck);
+          // Remove medicineKeyForCheck before adding
+          const { medicineKeyForCheck, ...medicineToAdd } = result.foundMedicine;
+          foundMedicines.push(medicineToAdd);
+          totalEstimatedPrice += result.price || 0;
+        }
+      }
+      
+      if (result.notFoundMedicine) {
+        notFoundMedicines.push(result.notFoundMedicine);
+      }
+      
+      if (result.relatedMedicines) {
+        relatedMedicines.push(...result.relatedMedicines);
+      }
+      
+      if (result.notes) {
+        for (const note of result.notes) {
+          if (!analysisNotes.some(n => n === note)) {
+            analysisNotes.push(note);
+          }
+        }
+      }
+      
+      if (result.requiresConsultation) {
+        requiresConsultation = true;
+      }
     }
+    
+    console.log(`✅ Completed parallel processing of ${validMedicines.length} medicines`);
   }
 
   // Step 3: Gemini API disabled - removed to avoid dependency on external AI service

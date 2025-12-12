@@ -20,8 +20,8 @@ export async function extractTextFromImage(imagePath: string): Promise<string> {
   try {
     console.log('🔍 Starting OCR for image:', imagePath);
     
-    // Add timeout wrapper for OCR process (max 60 seconds)
-    const OCR_TIMEOUT = 60000;
+    // Add timeout wrapper for OCR process (max 120 seconds - increased for production)
+    const OCR_TIMEOUT = 120000;
     
     // Suppress console warnings from Tesseract about image size (they're non-fatal)
     const originalConsoleWarn = console.warn;
@@ -693,9 +693,9 @@ Yêu cầu:
 
 Trả về văn bản đã được sửa chữa:`;
 
-    // Add timeout (10 seconds) to avoid blocking
+    // Add timeout (20 seconds) to avoid blocking - increased for production
     const timeoutPromise = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), 10000);
+      setTimeout(() => resolve(null), 20000);
     });
     
     const geminiPromise = model.generateContent(prompt).then(result => {
@@ -792,9 +792,9 @@ Lưu ý:
       parts = [{ text: prompt }];
     }
 
-    // Add timeout (10 seconds) to avoid blocking
+    // Add timeout (20 seconds) to avoid blocking - increased for production
     const timeoutPromise = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), 10000);
+      setTimeout(() => resolve(null), 20000);
     });
     
     const geminiPromise = model.generateContent(parts).then(result => {
