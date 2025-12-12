@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -20,7 +20,7 @@ import { Input } from '../../components/common/Input';
 import { AddressForm } from '../../components/checkout/AddressForm';
 import { PaymentMethodSelector } from '../../components/checkout/PaymentMethodSelector';
 import { CouponSelector } from '../../components/checkout/CouponSelector';
-import { Address, LegacyAddress } from '../../api/addresses';
+import { Address, LegacyAddress, addressesApi } from '../../api/addresses';
 import Toast from 'react-native-toast-message';
 import { Ionicons } from '@expo/vector-icons';
 import { API_BASE_URL } from '../../utils/constants';
@@ -58,6 +58,8 @@ export default function ConsultationScreen() {
   const [discountAmount, setDiscountAmount] = useState(0);
   const [addressErrors, setAddressErrors] = useState<Partial<Record<keyof LegacyAddress, string>>>({});
   const [snapshotItems, setSnapshotItems] = useState<Array<{ productId: string; quantity: number }>>([]);
+  const [showAddressPicker, setShowAddressPicker] = useState(false);
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const imageScrollRef = useRef<ScrollView>(null);
 
   // Helper function to validate selected items
@@ -100,7 +102,9 @@ export default function ConsultationScreen() {
         continue;
       }
       
-      if (medicine.stockQuantity < item.quantity) {
+      // Only block when we have a real finite stock number; skip unknown/Infinity
+      const hasFiniteStock = typeof medicine.stockQuantity === 'number' && Number.isFinite(medicine.stockQuantity);
+      if (hasFiniteStock && medicine.stockQuantity < item.quantity) {
         errors.push(`${medicine.productName} chỉ còn ${medicine.stockQuantity} ${medicine.unit || 'sản phẩm'}`);
       }
     }
@@ -127,13 +131,14 @@ export default function ConsultationScreen() {
           s => s?.productId === productId
         );
         if (suggestion) {
+          const fallbackStock = suggestion.stockQuantity ?? Infinity; // If stock unknown, don't block client-side
           medicine = {
             productId: suggestion.productId,
             productName: suggestion.productName,
             price: suggestion.price,
             unit: suggestion.unit,
-            inStock: true, // Assume in stock for suggestions
-            stockQuantity: 0,
+            inStock: suggestion.inStock ?? true, // default to true unless explicitly false
+            stockQuantity: fallbackStock,
             requiresPrescription: false,
             confidence: suggestion.confidence || 0.7,
             originalText: notFound.originalText || suggestion.productName, // Use originalText from notFound or fallback to productName
@@ -151,10 +156,30 @@ export default function ConsultationScreen() {
     queryFn: () => consultationApi.getUserPrescriptions({ limit: 5 }),
   });
 
+  const { data: addressesData } = useQuery({
+    queryKey: ['addresses'],
+    queryFn: () => addressesApi.getAddresses(),
+  });
+
+  useEffect(() => {
+    if (!addressesData?.data || addressesData.data.length === 0) return;
+    // Prefer default address; fallback to first
+    const defaultAddr = addressesData.data.find(addr => addr.isDefault) || addressesData.data[0];
+    if (!defaultAddr) return;
+    setSelectedAddressId(prev => prev || defaultAddr._id || null);
+    // Only auto-fill if user chưa nhập gì
+    if (!shippingAddress.fullName && !shippingAddress.address && !shippingAddress.province) {
+      setShippingAddress(addressToLegacy(defaultAddr));
+    }
+  }, [addressesData, shippingAddress.fullName, shippingAddress.address, shippingAddress.province]);
+
   // Helper functions to convert between LegacyAddress and Address
   const legacyToAddress = (legacy: LegacyAddress): Address => ({
     receiverName: legacy.fullName,
     receiverPhone: legacy.phone,
+    // Provide fullName/phone for AddressForm compatibility
+    fullName: legacy.fullName,
+    phone: legacy.phone,
     province: legacy.province,
     provinceName: legacy.province,
     district: legacy.district,
@@ -165,13 +190,30 @@ export default function ConsultationScreen() {
   });
 
   const addressToLegacy = (addr: Address): LegacyAddress => ({
-    fullName: addr.receiverName,
-    phone: addr.receiverPhone,
-    province: addr.province,
-    district: addr.district,
-    ward: addr.ward,
-    address: addr.address,
+  fullName: (addr as any).fullName || addr.receiverName || '',
+  phone: (addr as any).phone || addr.receiverPhone || '',
+  // Prefer human-readable name fields to avoid showing codes
+  province: addr.provinceName || addr.province || '',
+  district: addr.districtName || addr.district || '',
+  ward: addr.wardName || addr.ward || '',
+    address: addr.address || '',
   });
+
+  const handleSelectQuickAddress = (addr: Address) => {
+    setSelectedAddressId(addr._id || null);
+    setShippingAddress(addressToLegacy(addr));
+    setShowAddressPicker(false);
+  };
+
+  const renderAddressSummary = (addr: LegacyAddress) => {
+    const parts = [
+      addr.address,
+      addr.ward,
+      addr.district,
+      addr.province,
+    ].filter(Boolean);
+    return parts.join(', ');
+  };
 
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -1382,6 +1424,25 @@ export default function ConsultationScreen() {
               </View>
             </View>
 
+            {/* Quick address picker */}
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Địa chỉ giao hàng</Text>
+                <TouchableOpacity onPress={() => setShowAddressPicker(true)}>
+                  <Text style={styles.quickSelectText}>Chọn nhanh</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.quickAddressCard}>
+                <Text style={styles.quickAddressName}>{shippingAddress.fullName || 'Chưa chọn'}</Text>
+                {shippingAddress.phone ? (
+                  <Text style={styles.quickAddressPhone}>{shippingAddress.phone}</Text>
+                ) : null}
+                <Text style={styles.quickAddressAddress}>
+                  {renderAddressSummary(shippingAddress) || 'Vui lòng chọn địa chỉ'}
+                </Text>
+              </View>
+            </View>
+
             <AddressForm
               address={legacyToAddress(shippingAddress)}
               onChange={(addr) => setShippingAddress(addressToLegacy(addr))}
@@ -1428,6 +1489,89 @@ export default function ConsultationScreen() {
               onPress={handleCreateOrderFromPrescription}
               style={styles.modalButton}
               loading={isProcessing}
+            />
+          </View>
+        </View>
+      </Modal>
+
+      {/* Quick Address Picker Modal */}
+      <Modal
+        visible={showAddressPicker}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowAddressPicker(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Chọn địa chỉ</Text>
+            <TouchableOpacity onPress={() => setShowAddressPicker(false)}>
+              <Ionicons name="close" size={24} color={COLORS.text} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView style={styles.modalContent}>
+            {addressesData?.data && addressesData.data.length > 0 ? (
+              addressesData.data.map((addr: Address) => {
+                const isSelected = selectedAddressId === addr._id;
+                const summary = renderAddressSummary(addressToLegacy(addr));
+                return (
+                  <TouchableOpacity
+                    key={addr._id || summary}
+                    style={[
+                      styles.addressOption,
+                      isSelected && styles.addressOptionSelected,
+                    ]}
+                    onPress={() => handleSelectQuickAddress(addr)}
+                  >
+                    <View style={styles.addressOptionContent}>
+                      <View style={styles.addressOptionHeader}>
+                        <Text style={styles.addressOptionName}>{addr.receiverName}</Text>
+                        {addr.isDefault && (
+                          <View style={styles.defaultBadge}>
+                            <Text style={styles.defaultBadgeText}>Mặc định</Text>
+                          </View>
+                        )}
+                      </View>
+                      {addr.receiverPhone ? (
+                        <Text style={styles.addressOptionPhone}>{addr.receiverPhone}</Text>
+                      ) : null}
+                      {summary ? (
+                        <Text style={styles.addressOptionAddress}>{summary}</Text>
+                      ) : null}
+                      {addr.addressType && (
+                        <Text style={styles.addressOptionType}>
+                          {addr.addressType === 'home' ? '🏠 Nhà riêng' : '🏢 Công ty'}
+                        </Text>
+                      )}
+                    </View>
+                    {isSelected && (
+                      <Ionicons name="checkmark-circle" size={24} color={COLORS.primary} />
+                    )}
+                  </TouchableOpacity>
+                );
+              })
+            ) : (
+              <View style={styles.emptyAddressList}>
+                <Text style={styles.emptyAddressText}>Chưa có địa chỉ nào</Text>
+                <TouchableOpacity
+                  style={styles.addAddressButton}
+                  onPress={() => {
+                    setShowAddressPicker(false);
+                    (navigation as any).navigate('AddressList');
+                  }}
+                >
+                  <Text style={styles.addAddressButtonText}>Thêm địa chỉ</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </ScrollView>
+
+          <View style={styles.modalFooter}>
+            <Button
+              title="Đóng"
+              variant="outline"
+              onPress={() => setShowAddressPicker(false)}
+              style={styles.modalButton}
             />
           </View>
         </View>
@@ -1910,6 +2054,34 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: COLORS.primary,
   },
+  quickSelectText: {
+    color: COLORS.primary,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  quickAddressCard: {
+    backgroundColor: '#fff',
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginTop: 8,
+  },
+  quickAddressName: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  quickAddressPhone: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
+    marginTop: 4,
+  },
+  quickAddressAddress: {
+    fontSize: 13,
+    color: COLORS.text,
+    marginTop: 4,
+  },
   orderDiscount: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1923,6 +2095,63 @@ const styles = StyleSheet.create({
   discountAmount: {
     fontSize: 14,
     color: COLORS.success || '#28a745',
+    fontWeight: '600',
+  },
+  addressOption: {
+    backgroundColor: '#fff',
+    padding: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginBottom: 12,
+  },
+  addressOptionSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.primary + '10',
+  },
+  addressOptionContent: {
+    gap: 6,
+  },
+  addressOptionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  addressOptionName: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+    flex: 1,
+  },
+  addressOptionPhone: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
+  },
+  addressOptionAddress: {
+    fontSize: 13,
+    color: COLORS.text,
+  },
+  addressOptionType: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+  },
+  emptyAddressList: {
+    alignItems: 'center',
+    padding: 24,
+    gap: 12,
+  },
+  emptyAddressText: {
+    fontSize: 14,
+    color: COLORS.textSecondary,
+  },
+  addAddressButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: COLORS.primary,
+    borderRadius: 8,
+  },
+  addAddressButtonText: {
+    color: '#fff',
     fontWeight: '600',
   },
   paymentSection: {

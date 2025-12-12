@@ -1,6 +1,9 @@
 import { Product } from '../models/schema.js';
 import mongoose from 'mongoose';
 
+const escapeRegex = (str: string): string =>
+  (str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /**
  * Parse dosage/strength from medicine name
  * Examples:
@@ -182,7 +185,7 @@ function namesAreSimilar(normalized1: string, normalized2: string): boolean {
  * 
  * This ensures "2500mg+500mg" matches "2500mg/500mg" or "2500mg 500mg"
  */
-function normalizeDosageForComparison(dosage: string | null): string {
+export function normalizeDosageForComparison(dosage: string | null): string {
   if (!dosage || typeof dosage !== 'string') return '';
   
   // Normalize: remove spaces, underscores, +, -, /, but keep numbers and units (mg, g, ml, etc.)
@@ -584,7 +587,7 @@ export async function findSimilarMedicines(
     // Strategy 1: Search by description/keywords
     const keywords = baseName.split(/\s+/).filter(w => w.length > 2);
     if (keywords.length > 0) {
-      const keywordPattern = keywords.join('|');
+      const keywordPattern = keywords.map(k => escapeRegex(k)).join('|') || '.*';
       const keywordProducts = await Product.find({
         $or: [
           { description: { $regex: keywordPattern, $options: 'i' } },
