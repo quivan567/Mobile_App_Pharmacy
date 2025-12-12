@@ -296,8 +296,11 @@ export async function findExactMatch(
     
     // Check if base names match (normalized comparison - ONLY LETTERS, no numbers/spaces/special chars)
     // Also check for similarity (allowing for 1-2 missing letters from OCR errors)
+    // Allow substring containment to tolerate extra characters from OCR (align with web logic)
     const baseNameMatch = normalizedProductBaseName === normalizedBaseName || 
-                          namesAreSimilar(normalizedProductBaseName, normalizedBaseName);
+                          namesAreSimilar(normalizedProductBaseName, normalizedBaseName) ||
+                          (normalizedBaseName.length >= 5 && normalizedProductBaseName.includes(normalizedBaseName)) ||
+                          (normalizedProductBaseName.length >= 5 && normalizedBaseName.includes(normalizedProductBaseName));
 
     if (baseNameMatch) {
       // Check dosage match (normalized comparison - only numbers and units)
@@ -667,8 +670,260 @@ export async function findSimilarMedicines(
     }
   }
 
+  // Step 6: Search by indication/groupTherapeutic from medicines collection (ported from web)
+  const db = mongoose.connection.db;
+  if (db && similarProducts.length < limit) {
+    const medicinesCollection = db.collection('medicines');
+    
+    // Extract generic name, brand name, and dosage from medicineName
+    const { baseName, dosage } = parseMedicineName(medicineName);
+    const firstWord = baseName.split(/\s+/)[0];
+    
+    // Extract brand name from parentheses if available
+    const parenMatches = medicineName.match(/\(([^)]+)\)/g) || [];
+    let brandName: string | null = null;
+    if (parenMatches.length > 0) {
+      const lastParen = parenMatches[parenMatches.length - 1].replace(/[()]/g, '').trim();
+      const brandMatch = lastParen.match(/^([A-Za-zÀ-ỹ]+(?:\s+[A-Za-zÀ-ỹ]+)?)/);
+      if (brandMatch && brandMatch[1]) {
+        brandName = brandMatch[1].trim();
+      }
+    }
+    
+    // Generic name is typically the baseName (without brand)
+    const genericName = baseName;
+    
+    // Find target medicine in medicines collection to get indication/groupTherapeutic
+    const searchTerms = [
+      genericName || baseName,
+      brandName,
+      firstWord,
+      ...(baseName ? baseName.split(/\s+/).filter(w => w.length > 3) : [])
+    ].filter(Boolean);
+    
+    let targetMedicine = null;
+    let targetGroupTherapeutic = '';
+    let targetIndication = '';
+    let targetActiveIngredient = '';
+    
+    for (const searchTerm of searchTerms) {
+      if (searchTerm && searchTerm.length > 2) {
+        const escapedSearchTerm = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        
+        targetMedicine = await medicinesCollection.findOne({
+          $or: [
+            { name: { $regex: `^${escapedSearchTerm}`, $options: 'i' } },
+            { genericName: { $regex: `^${escapedSearchTerm}`, $options: 'i' } },
+            { name: { $regex: escapedSearchTerm, $options: 'i' } },
+            { genericName: { $regex: escapedSearchTerm, $options: 'i' } },
+            { activeIngredient: { $regex: escapedSearchTerm, $options: 'i' } },
+            { brand: { $regex: escapedSearchTerm, $options: 'i' } }
+          ]
+        });
+        
+        if (targetMedicine) {
+          targetGroupTherapeutic = targetMedicine.groupTherapeutic || '';
+          targetIndication = targetMedicine.indication || targetMedicine.description || targetMedicine.uses || targetMedicine.congDung || '';
+          targetActiveIngredient = targetMedicine.activeIngredient || '';
+          console.log(`🔍 Found target medicine in medicines collection: ${targetMedicine.name}`);
+          console.log(`   Indication: ${targetIndication}`);
+          console.log(`   GroupTherapeutic: ${targetGroupTherapeutic}`);
+          break;
+        }
+      }
+    }
+    
+    // Hardcoded mapping for common medicines (ported from web)
+    const medicineNameLower = (baseName || medicineName || '').toLowerCase();
+    if (!targetMedicine || (!targetGroupTherapeutic && !targetIndication)) {
+      // Mapping NSAID medicines
+      const nsaidMedicines = ['celecoxib', 'meloxicam', 'diclofenac', 'ibuprofen', 'naproxen', 'indomethacin', 'piroxicam', 'ketoprofen'];
+      const isNSAID = nsaidMedicines.some(name => medicineNameLower.includes(name));
+      
+      if (isNSAID) {
+        targetGroupTherapeutic = 'NSAID';
+        targetIndication = 'Giảm đau, kháng viêm';
+        console.log(`🔍 Detected NSAID medicine: ${baseName || medicineName}`);
+      }
+      
+      // Mapping Corticosteroid medicines
+      const corticosteroidMedicines = ['prednisolon', 'prednisone', 'dexamethasone', 'methylprednisolon', 'hydrocortisone', 'betamethasone'];
+      const isCorticosteroid = corticosteroidMedicines.some(name => medicineNameLower.includes(name));
+      
+      if (isCorticosteroid) {
+        targetGroupTherapeutic = 'Corticosteroid';
+        targetIndication = 'Chống viêm, ức chế miễn dịch, điều trị các bệnh tự miễn';
+        console.log(`🔍 Detected Corticosteroid medicine: ${baseName || medicineName}`);
+      }
+      
+      // Mapping Antibiotic medicines
+      const antibioticMedicines = ['amoxicillin', 'amoxicilin', 'ampicillin', 'penicillin', 'cephalexin', 'cefuroxime', 'azithromycin', 'clarithromycin', 'erythromycin'];
+      const isAntibiotic = antibioticMedicines.some(name => medicineNameLower.includes(name));
+      
+      if (isAntibiotic) {
+        targetGroupTherapeutic = 'Kháng sinh';
+        targetIndication = 'Điều trị nhiễm khuẩn';
+        console.log(`🔍 Detected Antibiotic medicine: ${baseName || medicineName}`);
+      }
+    }
+    
+    // Search medicines with same indication/groupTherapeutic
+    if (targetGroupTherapeutic || targetIndication) {
+      console.log(`🔍 Searching medicines collection by indication/groupTherapeutic/activeIngredient...`);
+      
+      // Priority 1: Search by activeIngredient
+      let medicinesWithSameActiveIngredient: any[] = [];
+      let activeIngredientToSearch = '';
+      
+      if (targetMedicine && targetMedicine.activeIngredient) {
+        activeIngredientToSearch = (targetMedicine.activeIngredient || '').toLowerCase();
+      } else if (baseName && baseName.length > 3) {
+        activeIngredientToSearch = baseName.toLowerCase();
+        console.log(`🔍 No targetMedicine found, using baseName as activeIngredient: "${activeIngredientToSearch}"`);
+      }
+      
+      if (activeIngredientToSearch) {
+        const mainActiveIngredient = activeIngredientToSearch.split(/[,;]/)[0]?.trim();
+        if (mainActiveIngredient && mainActiveIngredient.length > 3) {
+          console.log(`🔍 Priority: Searching medicines with same activeIngredient: "${mainActiveIngredient}"`);
+          
+          const escapedMainActiveIngredient = mainActiveIngredient.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const searchCriteria: any = {
+            $or: [
+              { activeIngredient: { $regex: escapedMainActiveIngredient, $options: 'i' } },
+              { genericName: { $regex: escapedMainActiveIngredient, $options: 'i' } },
+              { name: { $regex: escapedMainActiveIngredient, $options: 'i' } }
+            ]
+          };
+          
+          if (targetMedicine) {
+            searchCriteria._id = { $ne: targetMedicine._id };
+          }
+          
+          medicinesWithSameActiveIngredient = await medicinesCollection.find(searchCriteria)
+            .limit(15)
+            .toArray();
+          console.log(`📦 Found ${medicinesWithSameActiveIngredient.length} medicines with same activeIngredient: "${mainActiveIngredient}"`);
+        }
+      }
+      
+      // Priority 2: Search by indication/groupTherapeutic
+      const searchCriteria: any = {};
+      if (targetMedicine) {
+        searchCriteria._id = { $ne: targetMedicine._id };
+      }
+      
+      const orConditions: any[] = [];
+      if (targetIndication) {
+        orConditions.push({ indication: targetIndication });
+        const escapedTargetIndication = targetIndication.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        orConditions.push({ indication: { $regex: escapedTargetIndication, $options: 'i' } });
+        
+        const indicationKeywords = targetIndication
+          .toLowerCase()
+          .split(/[,\s;]+/)
+          .filter(word => word.length > 3 && !['điều', 'trị', 'các', 'bệnh', 'và', 'cho'].includes(word));
+        
+        for (const keyword of indicationKeywords.slice(0, 5)) {
+          const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          orConditions.push({ indication: { $regex: escapedKeyword, $options: 'i' } });
+          orConditions.push({ description: { $regex: escapedKeyword, $options: 'i' } });
+          orConditions.push({ uses: { $regex: escapedKeyword, $options: 'i' } });
+          orConditions.push({ congDung: { $regex: escapedKeyword, $options: 'i' } });
+        }
+      }
+      
+      if (targetGroupTherapeutic) {
+        orConditions.push({ groupTherapeutic: targetGroupTherapeutic });
+        const escapedTargetGroupTherapeutic = targetGroupTherapeutic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        orConditions.push({ groupTherapeutic: { $regex: escapedTargetGroupTherapeutic, $options: 'i' } });
+      }
+      
+      if (targetActiveIngredient) {
+        const mainActiveIngredient = targetActiveIngredient.split(/[,;]/)[0]?.trim();
+        if (mainActiveIngredient && mainActiveIngredient.length > 3) {
+          const escapedMainActiveIngredient = mainActiveIngredient.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          orConditions.push({ activeIngredient: { $regex: escapedMainActiveIngredient, $options: 'i' } });
+          orConditions.push({ genericName: { $regex: escapedMainActiveIngredient, $options: 'i' } });
+        }
+      }
+      
+      if (orConditions.length > 0) {
+        searchCriteria.$or = orConditions;
+        
+        const medicinesWithSameIndication = await medicinesCollection.find(searchCriteria)
+          .limit(10)
+          .toArray();
+        
+        console.log(`📦 Found ${medicinesWithSameIndication.length} medicines with same indication/groupTherapeutic`);
+        
+        // Filter to only same groupTherapeutic
+        const medicinesWithSameGroupTherapeutic = medicinesWithSameIndication.filter(m => {
+          if (targetGroupTherapeutic && m.groupTherapeutic) {
+            const targetGroupLower = targetGroupTherapeutic.toLowerCase();
+            const medicineGroupLower = m.groupTherapeutic.toLowerCase();
+            return targetGroupLower === medicineGroupLower || 
+                   (targetGroupLower.includes('nsaid') && medicineGroupLower.includes('nsaid')) ||
+                   (targetGroupLower.includes('kháng viêm') && medicineGroupLower.includes('kháng viêm')) ||
+                   (targetGroupLower.includes('kháng sinh') && medicineGroupLower.includes('kháng sinh')) ||
+                   (targetGroupLower.includes('corticosteroid') && medicineGroupLower.includes('corticosteroid'));
+          }
+          return false;
+        });
+        
+        const allMedicinesToCheck = [
+          ...medicinesWithSameActiveIngredient,
+          ...medicinesWithSameGroupTherapeutic.filter(m => 
+            !medicinesWithSameActiveIngredient.some(ai => String(ai._id) === String(m._id))
+          )
+        ];
+        
+        // Find corresponding products and add to similarProducts
+        const normalizedInputDosage = normalizeDosageForComparison(dosage);
+        
+        for (const medicine of allMedicinesToCheck) {
+          if (similarProducts.length >= limit) break;
+          
+          const medicineNameForSearch = medicine.name?.split('(')[0].trim() || medicine.name || '';
+          const product = await Product.findOne({
+            $or: [
+              { name: { $regex: medicineNameForSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+              { description: { $regex: medicineNameForSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+            ]
+          });
+          
+          if (product) {
+            const productId = String(product._id);
+            if (!seenIds.has(productId)) {
+              seenIds.add(productId);
+              
+              const productParsed = parseMedicineName(product.name);
+              const normalizedProductDosage = normalizeDosageForComparison(productParsed.dosage);
+              const dosageMatches = normalizedInputDosage && normalizedProductDosage 
+                ? normalizedInputDosage === normalizedProductDosage
+                : false;
+              
+              const matchReason = dosageMatches 
+                ? 'same_indication_same_dosage'
+                : 'same_indication_different_dosage';
+              const confidence = dosageMatches ? 0.85 : 0.70;
+              
+              similarProducts.push({
+                ...product.toObject(),
+                matchReason,
+                confidence
+              });
+              
+              console.log(`    ✅ Added by indication/groupTherapeutic: ${product.name} (${matchReason})`);
+            }
+          }
+        }
+      }
+    }
+  }
+
   console.log(`✅ Found ${similarProducts.length} similar medicines (from ${allProducts.length} candidates)`);
 
-  return similarProducts;
+  return similarProducts.slice(0, limit);
 }
 

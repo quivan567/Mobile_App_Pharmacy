@@ -1241,6 +1241,151 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
   let confidence = 0.85;
   let extractedInfo: any = null;
 
+  // Build search terms (brand/generic/dosage) to improve matching consistency with web
+  const buildSearchTerms = (originalText: string, cleanText: string) => {
+    const terms = new Set<string>();
+    const sourceText = cleanText || originalText || '';
+    const { baseName, dosage } = parseMedicineName(sourceText);
+
+    // Extract brand name from the last parentheses group if available
+    const parenMatches = sourceText.match(/\(([^)]+)\)/g) || [];
+    let brandName: string | null = null;
+    if (parenMatches.length > 0) {
+      const lastParen = parenMatches[parenMatches.length - 1].replace(/[()]/g, '').trim();
+      const brandMatch = lastParen.match(/^([A-Za-zÀ-ỹ]+(?:\s+[A-Za-zÀ-ỹ]+)?)/);
+      if (brandMatch && brandMatch[1]) {
+        brandName = brandMatch[1].trim();
+      }
+    }
+
+    if (brandName && dosage) terms.add(`${brandName} ${dosage}`);
+    if (brandName) terms.add(brandName);
+    if (baseName && dosage) terms.add(`${baseName} ${dosage}`);
+    if (baseName) terms.add(baseName);
+    if (cleanText) terms.add(cleanText);
+    if (originalText) terms.add(originalText);
+
+    return Array.from(terms).filter(t => t && t.length > 1);
+  };
+
+  // Helper function to fix OCR errors in medicine names (ported from web)
+  const fixOcrMedicineNames = (text: string): string => {
+    let fixed = text;
+    
+    // Sửa các tên thuốc phổ biến bị thiếu chữ ở đầu
+    const commonFixes: Array<{ pattern: RegExp; replacement: string }> = [
+      // "oxicilin" -> "Amoxicilin" (thiếu "Am")
+      { pattern: /\boxicilin\b/gi, replacement: 'Amoxicilin' },
+      // "moxicilin" -> "Amoxicilin" (thiếu "A")
+      { pattern: /\bmoxicilin\b/gi, replacement: 'Amoxicilin' },
+      // "cetyl" -> "Acetyl" (thiếu "A")
+      { pattern: /\bcetyl\s+leucin\b/gi, replacement: 'Acetyl leucin' },
+      // "cetaminophen" -> "Acetaminophen" (thiếu "A")
+      { pattern: /\bcetaminophen\b/gi, replacement: 'Acetaminophen' },
+      // "aracetamol" -> "Paracetamol" (thiếu "P")
+      { pattern: /\baracetamol\b/gi, replacement: 'Paracetamol' },
+      // "racetamol" -> "Paracetamol" (thiếu "P")
+      { pattern: /\bracetamol\b/gi, replacement: 'Paracetamol' },
+    ];
+    
+    for (const fix of commonFixes) {
+      fixed = fixed.replace(fix.pattern, fix.replacement);
+    }
+    
+    return fixed;
+  };
+  
+  // Helper function to clean OCR text (fix character errors, numbers, spaces) - ported from web
+  const cleanOcrText = (text: string): string => {
+    let cleaned = text;
+    
+    // Sửa lỗi OCR phổ biến:
+    // 1. "l4" -> "14" (chữ "l" thường bị OCR nhầm với số "1")
+    cleaned = cleaned.replace(/\bl(\d+)\b/gi, '1$1');
+    // 2. "l" đứng trước số (không phải từ) -> "1"
+    cleaned = cleaned.replace(/\bl(\d)/gi, '1$1');
+    // 3. "I" (chữ I hoa) đứng trước số -> "1"
+    cleaned = cleaned.replace(/\bI(\d)/g, '1$1');
+    // 4. "|" (pipe) đứng trước số -> "1"
+    cleaned = cleaned.replace(/\|(\d)/g, '1$1');
+    // 5. Sửa "215g" -> "2,5g" (nếu có context Mezapulgit)
+    if (/mezapulgit/i.test(cleaned) && /215g/i.test(cleaned)) {
+      cleaned = cleaned.replace(/215g/gi, '2,5g');
+    }
+    // 6. Sửa format hàm lượng: "-2,5g" -> "- 2,5g" (thêm khoảng trắng sau dấu -)
+    cleaned = cleaned.replace(/-(\d+[.,]?\d*\s*(?:mg|g|ml))/gi, '- $1');
+    // 7. Sửa format hàm lượng: "+0,3g" -> "+ 0,3g" (thêm khoảng trắng sau dấu +)
+    cleaned = cleaned.replace(/\+\s*(\d+[.,]?\d*\s*(?:mg|g|ml))/gi, '+ $1');
+    // 8. Sửa "Viên)" -> "Viên" (nếu có dấu ngoặc đóng thừa)
+    cleaned = cleaned.replace(/(\d+\s*(?:Viên|Gói|Vién))\)/gi, '$1');
+    // 9. Loại bỏ khoảng trắng thừa
+    cleaned = cleaned.replace(/\s+/g, ' ').trim();
+    // 10. Sửa các pattern như "-215g +" -> "- 2,5g +" (nếu có context Mezapulgit)
+    if (/mezapulgit/i.test(cleaned)) {
+      cleaned = cleaned.replace(/-215g\s*\+/gi, '- 2,5g +');
+      cleaned = cleaned.replace(/-2,5g\s*\+\s*0\.3g\s*\+\s*0\.2g/gi, '- 2,5g + 0,3g + 0,2g');
+      cleaned = cleaned.replace(/-2,5g\s*\+\s*0,3g\s*\+\s*0,2g/gi, '- 2,5g + 0,3g + 0,2g');
+    }
+    // 11. Loại bỏ các ký tự lạ ở cuối (như "+" đơn độc không có gì sau, hoặc "-" đơn độc)
+    // Nhưng chỉ loại bỏ nếu không có dấu ngoặc mở chưa đóng
+    const openParens = (cleaned.match(/\(/g) || []).length;
+    const closeParens = (cleaned.match(/\)/g) || []).length;
+    if (openParens === closeParens) {
+      cleaned = cleaned.replace(/\s*[+\-]\s*$/, '');
+    }
+    
+    return cleaned;
+  };
+
+  // Helper function to validate medicine name (ported from web)
+  const isValidMedicineName = (text: string): boolean => {
+    if (!text || typeof text !== 'string') return false;
+    
+    // Remove common prefixes/suffixes and clean
+    const cleaned = text.trim()
+      .replace(/^[\.\s]+/, '') // Remove leading dots/spaces
+      .replace(/[\.\s]+$/, '') // Remove trailing dots/spaces
+      .trim();
+    
+    if (cleaned.length < 3) return false;
+    
+    // STRICT: Check if it's just numbers (like "38", "81467", "38;", "38.")
+    if (/^\d+$/.test(cleaned)) return false;
+    
+    // Check if it's just numbers with separators (like "38;", "38.", "38,", "38 ")
+    if (/^\d+[\.\s;,\-]*$/.test(cleaned)) return false;
+    
+    // Check if it's mostly numbers with only separators
+    const numbersOnly = cleaned.replace(/[^\d]/g, '');
+    const withoutSeparators = cleaned.replace(/[^\d\.\s;,\-]/g, '');
+    if (numbersOnly.length >= 2 && numbersOnly.length === withoutSeparators.length) {
+      return false; // It's just numbers with separators
+    }
+    
+    // Check if it starts with dot and numbers (like ". 81467 82196 Bs")
+    if (/^\.\s*\d+/.test(cleaned)) return false;
+    
+    // Check if it contains at least one letter (medicine names should have letters)
+    if (!/[a-zA-ZÀ-ỹ]/.test(cleaned)) return false;
+    
+    // Check if it's too short after cleaning
+    const lettersOnly = cleaned.replace(/[^a-zA-ZÀ-ỹ]/g, '');
+    if (lettersOnly.length < 3) return false;
+    
+    // Exclude common non-medicine patterns
+    const lowerText = cleaned.toLowerCase();
+    if (lowerText.includes('bs') && /^\d/.test(cleaned)) return false; // "Bs" with numbers
+    if (lowerText.match(/^\d+\s*(bs|bác\s*sĩ)/i)) return false; // "81467 Bs"
+    
+    // Additional check: if the text is mostly numbers (more than 70% digits), reject it
+    const digitCount = (cleaned.match(/\d/g) || []).length;
+    if (digitCount > 0 && (digitCount / cleaned.length) > 0.7 && lettersOnly.length < 5) {
+      return false;
+    }
+    
+    return true;
+  };
+
   // Step 1: Extract text from image using OCR if image is provided
   if (prescriptionImage && !prescriptionText) {
     try {
@@ -1268,95 +1413,364 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
     }
   }
 
-  // Step 2: Parse prescription text to extract medicine names
+  // Step 2: Parse prescription text to extract medicine names (with line merging and OCR fixes)
   if (prescriptionText) {
     const lines = prescriptionText.split('\n').map(line => line.trim()).filter(line => line.length > 2);
     
-    // List of keywords that indicate non-medicine lines (should be excluded)
-    const nonMedicineKeywords = [
-      'đơn thuốc', 'họ tên', 'tuổi', 'chẩn đoán', 'chân đoán', 'chan doan',
-      'ngày', 'bác sĩ', 'bác sỹ', 'bệnh viện', 'phòng khám', 'số điện thoại',
-      'địa chỉ', 'dia chi', 'cách dùng', 'cach dung', 'lời dặn', 'loi dan',
-      'lời dan', 'thuốc điều trị', 'thuoc dieu tri', 'tên đơn vi', 'ten don vi',
-      'pon thuoc', 'mã số', 'ma so', 'nơi thường trú', 'noi thuong tru',
-      'giới tính', 'gioi tinh', 'cân nặng', 'can nang', 'khám bệnh', 'kham benh',
-      'ký', 'ghi rõ', 'ghi ro', 'họ và tên', 'ho va ten', 'người đưa', 'nguoi dua'
+    // Find medicine section start (from "Thuốc điều trị" or numbered list)
+    let medicineSectionStartIndex = -1;
+    const medicineSectionKeywords = [
+      'thuốc điều trị', 'thuốc điều tri', 'thuoc dieu tri', 'thuoc dieu trị',
+      'thuốc điều tri', 'thuoc điều trị'
     ];
-
-    // Filter out non-medicine lines - More flexible like web version
-    const medicineLines = lines.filter(line => {
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line) continue;
       const lowerLine = line.toLowerCase();
-      // Check if line contains any non-medicine keyword
-      const hasNonMedicineKeyword = nonMedicineKeywords.some(keyword => lowerLine.includes(keyword));
-      if (hasNonMedicineKeyword) return false;
+      if (medicineSectionKeywords.some(keyword => lowerLine.includes(keyword))) {
+        medicineSectionStartIndex = i;
+        console.log(`✅ Found "Thuốc điều trị" at line ${i + 1}: "${line}"`);
+        break;
+      }
+    }
+    
+    // If not found, find numbered list pattern
+    if (medicineSectionStartIndex === -1) {
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        if (/^\d+[\.\)]\s*[A-ZÀ-Ỹ]/.test(line) || 
+            /^\d+[\.\)]\s*[a-zA-ZÀ-ỹ]+.*\d+\s*(mg|g|ml|l|mcg|iu|ui|%)/i.test(line)) {
+          medicineSectionStartIndex = i;
+          console.log(`✅ Found medicine section at line ${i + 1} (starts with number): "${line}"`);
+          break;
+        }
+      }
+    }
+    
+    if (medicineSectionStartIndex === -1) {
+      medicineSectionStartIndex = 0;
+      console.log(`⚠️ Could not find "Thuốc điều trị" section, starting from line 1`);
+    }
+    
+    // Determine stop point (when encountering non-medicine sections)
+    const stopKeywords = [
+      'lời dặn', 'lời dan', 'loi dan', 'loi dặn',
+      'bác sĩ', 'bác sy', 'bac si', 'bac sy',
+      'y sĩ', 'y sỹ', 'y si', 'y sy',
+      'khám bệnh lại', 'khám bệnh lai',
+      'số điện thoại liên hệ', 'so dien thoai lien he',
+      'họ và tên người đưa trẻ', 'ho va ten nguoi dua tre',
+      'đã cấp thuốc', 'da cap thuoc',
+      'cộng khoản', 'cong khoan'
+    ];
+    
+    let medicineSectionEndIndex = lines.length;
+    for (let i = medicineSectionStartIndex; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line) continue;
+      const lowerLine = line.toLowerCase();
       
-      // A medicine line should have at least one of these indicators (more flexible):
-      // 1. Contains dosage (mg, g, ml, %, mcg, iu)
-      const hasDosage = /\d+\s*(mg|g|ml|l|%|mcg|iu|ui)/i.test(line);
-      // 2. Contains quantity indicator (SL:, số + viên/hộp/chai/gói/lọ/tuýp)
-      const hasQuantity = /(SL\s*:|số lượng|so luong|:\s*\d+\s*(viên|hộp|chai|gói|lọ|tuýp|tuyp))/i.test(line);
-      // 3. Starts with numbered list (1) or 1.) - This is the most common pattern
-      const isNumberedList = /^\d+[\.\)]\s*/.test(line);
-      // 4. Contains medicine name pattern (more flexible - doesn't require capital letter)
-      const hasMedicinePattern = /[A-Za-zÀ-ỹ]/.test(line);
+      // Skip usage info (Sáng:, Chiều:, etc.)
+      const isUsageInfo = /(sáng|chiều|chiêu|tối|trưa)\s*:\s*\d+\s*(viên|vién|gói|vi|ml|mg)/i.test(line) ||
+                          /\d+\s*(viên|vién|gói)\s*\/\s*(ngày|ngdy)/i.test(line) ||
+                          /\[.*(viên|vién|gói).*\]/i.test(line) ||
+                          /(viên|vién|gói)\s*\/\s*(ngày|ngdy)/i.test(line) ||
+                          /(sáng|chiều|chiêu|tối|trưa).*:\s*\d+/i.test(line);
       
-      // More flexible: If it's a numbered list, accept it even without strict patterns
-      // This matches the web version's simpler logic
-      if (isNumberedList && hasMedicinePattern && !hasNonMedicineKeyword) {
-        return true;
+      if (isUsageInfo) {
+        console.log(`   ℹ️ Skipped usage info line (not a stop keyword): "${line}"`);
+        continue;
       }
       
-      // Otherwise, must have at least one medicine indicator AND not have non-medicine keywords
-      return (hasDosage || hasQuantity || isNumberedList) && hasMedicinePattern && !hasNonMedicineKeyword;
-    });
-
-    // Extract medicine names from lines
-    for (const line of medicineLines) {
-      // Try different patterns to extract medicine names
-      // Pattern 1: Numbered list (1. Medicine name or 1) Medicine name)
-      let medicineMatch = line.match(/^\d+[\.\)]\s*(.+)/);
-      if (!medicineMatch) {
-        // Pattern 2: Medicine name at start of line (common in prescriptions)
-        // More flexible - doesn't require capital letter (OCR might miss it)
-        // Use the same pattern as web version for consistency
-        medicineMatch = line.match(/^([A-Za-zÀ-ỹ][A-Za-zÀ-ỹ0-9\s_+\-\.\/\(\)]+)/);
+      // Check stop keywords
+      if (stopKeywords.some(keyword => lowerLine.includes(keyword))) {
+        const hasUsagePattern = /(sáng|chiều|chiêu|tối|trưa).*:\s*\d+.*(viên|vién|gói)/i.test(line) ||
+                                /\d+\s*(viên|vién|gói).*\//i.test(line);
+        
+        if (!hasUsagePattern) {
+          medicineSectionEndIndex = i;
+          console.log(`✅ Found stop keyword at line ${i + 1}: "${line}"`);
+          break;
+        }
+      }
+    }
+    
+    console.log(`📋 Medicine section: lines ${medicineSectionStartIndex + 1} to ${medicineSectionEndIndex}`);
+    
+    // Merge lines (handle OCR line breaks) - ported from web
+    const mergedLines: Array<{ text: string; lineIndex: number }> = [];
+    let currentMedicineLine = '';
+    let currentLineIndex = -1;
+    
+    for (let lineIndex = medicineSectionStartIndex; lineIndex < medicineSectionEndIndex; lineIndex++) {
+      const line = lines[lineIndex];
+      if (!line) continue;
+      
+      // Skip non-medicine lines
+      if (line.includes('ĐƠN THUỐC') || 
+          line.includes('Họ tên') || 
+          line.includes('Tuổi') || 
+          (line.includes('Chẩn đoán') && !line.match(/^\d+[\.\)]/))) {
+        continue;
       }
       
-      // Pattern 3: Try the web version's pattern for numbered lists (more flexible)
-      if (!medicineMatch) {
-        const webPattern = /\d+[\.\)]\s*((?:(?!\s*\d+[\.\)]).)+?)(?=\s*\d+[\.\)]|$)/g;
-        const webMatch = webPattern.exec(line);
-        if (webMatch && webMatch[1]) {
-          medicineMatch = { 1: webMatch[1].trim() };
+      // If line starts with number, it's a new medicine
+      if (/^\d+[\.\)]?\s*[A-ZÀ-Ỹ]/.test(line) || /^\d+\s+[A-ZÀ-Ỹ]/.test(line)) {
+        // Save previous line
+        if (currentMedicineLine && currentLineIndex >= 0) {
+          mergedLines.push({ text: currentMedicineLine.trim(), lineIndex: currentLineIndex });
+        }
+        // Start new line
+        currentMedicineLine = line;
+        currentLineIndex = lineIndex;
+      } else if (currentMedicineLine) {
+        // Check if this line is continuation of current medicine
+        const isUsageInfo = /^(sáng|chiều|tối|trưa|chiêu)\s*:/i.test(line.trim());
+        
+        const looksLikeMedicineContinuation = /[a-zA-ZÀ-ỹ]/.test(line) && 
+          (!isUsageInfo) &&
+          (
+            /^[a-zà-ỹ]/.test(line.trim()) ||
+            /^\s*\+/.test(line.trim()) ||
+            /\d+[.,]?\d*\s*(mg|g|ml|viên|gói)/i.test(line) ||
+            /\)/.test(line) ||
+            /(mg|g|ml|viên|gói|acid|clavulanic|amoxicilin|paracetamol|acetyl|leucin|attapulgit|mezapulgit|hydroxyd|magnesi|carbonat)/i.test(line)
+          );
+        
+        const hasUnclosedParenthesis = (currentMedicineLine.match(/\(/g) || []).length > (currentMedicineLine.match(/\)/g) || []).length;
+        const endsWithPlusOrMinus = /[+\-]\s*$/.test(currentMedicineLine.trim());
+        const definitelyContinuation = hasUnclosedParenthesis || endsWithPlusOrMinus;
+        
+        if (looksLikeMedicineContinuation || definitelyContinuation) {
+          currentMedicineLine += ' ' + line;
+        } else {
+          // Save current and reset
+          if (currentMedicineLine && currentLineIndex >= 0) {
+            mergedLines.push({ text: currentMedicineLine.trim(), lineIndex: currentLineIndex });
+          }
+          currentMedicineLine = '';
+          currentLineIndex = -1;
+        }
+      } else {
+        // Check if line looks like medicine without number prefix
+        const looksLikeMedicine = /[a-zA-ZÀ-ỹ]/.test(line) && 
+          !/^(sáng|chiều|tối|trưa|chiêu)\s*:/i.test(line.trim()) &&
+          (
+            /(amoxicilin|paracetamol|acetyl|leucin|attapulgit|mezapulgit|acid|clavulanic|dopagan|gikanin)/i.test(line) ||
+            /\d+\s*(mg|g|ml|viên|gói)/i.test(line) ||
+            /\([A-Za-zÀ-ỹ]+/.test(line)
+          );
+        
+        if (looksLikeMedicine) {
+          // Check if continuation of last medicine
+          let isContinuation = false;
+          if (mergedLines.length > 0) {
+            const lastMedicineEntry = mergedLines[mergedLines.length - 1];
+            if (lastMedicineEntry && lastMedicineEntry.text) {
+              const lastMedicine = lastMedicineEntry.text;
+              const openParens = (lastMedicine.match(/\(/g) || []).length;
+              const closeParens = (lastMedicine.match(/\)/g) || []).length;
+              const trimmedLast = lastMedicine.trim();
+              if (trimmedLast && (openParens > closeParens || trimmedLast.endsWith('+') || trimmedLast.endsWith('-'))) {
+                lastMedicineEntry.text += ' ' + line;
+                isContinuation = true;
+                console.log(`   ℹ️ Merged continuation line to previous medicine: "${line}"`);
+              }
+            }
+          }
+          
+          if (!isContinuation) {
+            const nextNumber = mergedLines.length + 1;
+            const medicineLineWithNumber = `${nextNumber} ${line}`;
+            currentMedicineLine = medicineLineWithNumber;
+            currentLineIndex = lineIndex;
+            console.log(`   ℹ️ Auto-added number ${nextNumber} to medicine line: "${line}"`);
+          }
+        }
+      }
+    }
+    
+    // Save last line
+    if (currentMedicineLine && currentLineIndex >= 0) {
+      mergedLines.push({ text: currentMedicineLine.trim(), lineIndex: currentLineIndex });
+    }
+    
+    // Apply OCR fixes to merged lines
+    for (const lineEntry of mergedLines) {
+      if (lineEntry && lineEntry.text) {
+        const original = lineEntry.text;
+        const fixed = fixOcrMedicineNames(original);
+        if (fixed !== original) {
+          console.log(`   🔧 Fixed OCR error: "${original.substring(0, 50)}..." -> "${fixed.substring(0, 50)}..."`);
+          lineEntry.text = fixed;
+        }
+      }
+    }
+    
+    console.log(`📋 Merged ${mergedLines.length} medicine lines from ${medicineSectionEndIndex - medicineSectionStartIndex} original lines`);
+    
+    // Extract medicine names from merged lines
+    const allMedicineMatches: Array<{ text: string; lineIndex: number }> = [];
+    
+    for (const { text: line, lineIndex } of mergedLines) {
+      // Find all medicine patterns in the line (support both "1." and "1)" formats)
+      const medicinePattern = /\d+[\.\)]?\s*((?:(?!\s*\d+[\.\)]).)+?)(?=\s*\d+[\.\)]|$)/g;
+      let match;
+      let foundAny = false;
+      
+      medicinePattern.lastIndex = 0;
+      
+      while ((match = medicinePattern.exec(line)) !== null) {
+        foundAny = true;
+        const medicineText = match[1]?.trim();
+        
+        if (medicineText && medicineText.length > 2) {
+          const cleaned = medicineText.replace(/^[\.\s]+/, '').replace(/[\.\s]+$/, '').trim();
+          if (!/^\d+$/.test(cleaned) && /[a-zA-ZÀ-ỹ]/.test(cleaned)) {
+            allMedicineMatches.push({
+              text: medicineText,
+              lineIndex
+            });
+            console.log(`   Found medicine pattern: "${medicineText}"`);
+          } else {
+            console.log(`   ⚠️ Skipped invalid pattern (numbers only): "${medicineText}"`);
+          }
         }
       }
       
-      if (medicineMatch && medicineMatch[1]) {
-        const medicineText = medicineMatch[1].trim();
+      // If no pattern match found, try simple pattern at start of line
+      if (!foundAny) {
+        const simpleMatch = line.match(/^\d+[\.\)]?\s*(.+)/);
+        if (simpleMatch && simpleMatch[1]) {
+          const medicineText = simpleMatch[1].trim();
+          
+          if (medicineText && medicineText.length > 2) {
+            const cleaned = medicineText.replace(/^[\.\s]+/, '').replace(/[\.\s]+$/, '').trim();
+            if (!/^\d+$/.test(cleaned) && /[a-zA-ZÀ-ỹ]/.test(cleaned)) {
+              allMedicineMatches.push({
+                text: medicineText,
+                lineIndex
+              });
+              console.log(`   Found medicine at start of line: "${medicineText}"`);
+            } else {
+              console.log(`   ⚠️ Skipped invalid pattern (numbers only): "${medicineText}"`);
+            }
+          }
+        }
+      }
+    }
+    
+    console.log(`🔍 Found ${allMedicineMatches.length} medicine patterns in text`);
+    
+    // Filter valid medicines using isValidMedicineName
+    const validMedicines = allMedicineMatches.filter(({ text }) => {
+      if (!isValidMedicineName(text)) return false;
+      
+      // Additional filtering: exclude non-medicine keywords
+      const lowerText = text.toLowerCase().trim();
+      const nonMedicineKeywords = [
+        'thuốc điều trị', 'thuốc điều tri', 'cách dùng', 'cách dung',
+        'uống', 'dùng ngoài', 'sáng', 'chiều', 'tối', 'trưa', 'sl:',
+        'ghi chú', 'lời dặn', 'chẩn đoán', 'họ tên', 'tuổi', 'giới tính',
+        'địa chỉ', 'điện thoại', 'mã số', 'bảo hiểm', 'nơi thường trú',
+        'bác sĩ', 'bác sy', 'y sĩ', 'khám bệnh', 'tên đơn vị', 'cơ sở',
+        'đơn thuốc', 'đơn vị', 'số định danh', 'căn cước', 'hộ chiếu',
+        'người bệnh', 'nếu có', 'néu có', 'ton thương', 'tổn thương',
+        'nông', 'ở cô', 'cổ', 'tay', 'bàn tay', 'thoái hóa', 'cột sống', 'viêm khớp'
+      ];
+      
+      // Check if starts with non-medicine keyword
+      const startsWithKeyword = nonMedicineKeywords.some(keyword => {
+        if (lowerText.startsWith(keyword + ':') || lowerText.startsWith(keyword + ' ')) {
+          const afterKeyword = text.substring(text.toLowerCase().indexOf(keyword) + keyword.length).trim();
+          if (afterKeyword.length < 3 || 
+              /^[\d\s:;,\-|\.x]+$/.test(afterKeyword) ||
+              /^\.\s*x?$/.test(afterKeyword) ||
+              /^[\d\s:;,\-|]+$/.test(afterKeyword) ||
+              /^\d+$/.test(afterKeyword) ||
+              (/^[A-Z\s,]+$/.test(afterKeyword) && afterKeyword.length > 20)) {
+            return true;
+          }
+        }
+        if (lowerText === keyword || lowerText === keyword + ':' || 
+            /^thuốc\s+điều\s+trị\s*[:.]\s*\.?\s*x?$/i.test(lowerText)) {
+          return true;
+        }
+        return false;
+      });
+      
+      if (startsWithKeyword) {
+        console.log(`   ⚠️ Skipped non-medicine text (starts with non-medicine keyword): "${text}"`);
+        return false;
+      }
+      
+      // Exclude doctor information
+      if (lowerText.includes('bác sy') || lowerText.includes('bác sĩ') || 
+          lowerText.includes('y sỹ') || lowerText.includes('y sĩ') ||
+          (lowerText.includes('khám bệnh') && !/[a-zA-ZÀ-ỹ]{5,}/.test(text))) {
+        console.log(`   ⚠️ Skipped non-medicine text (doctor information): "${text}"`);
+        return false;
+      }
+      
+      // Exclude phone numbers
+      const isPhoneNumber = /^[\d\s\-\(\)]+$/.test(text.trim()) && 
+                            text.trim().replace(/\D/g, '').length >= 7 &&
+                            text.trim().replace(/\D/g, '').length <= 15;
+      if (isPhoneNumber) {
+        console.log(`   ⚠️ Skipped phone number: "${text}"`);
+        return false;
+      }
+      
+      // Exclude diagnosis codes
+      if (/^[A-Z]\d+\.?\d*/.test(text.trim()) && !/[a-zA-ZÀ-ỹ]{5,}/.test(text)) {
+        console.log(`   ⚠️ Skipped diagnosis code (not medicine): "${text}"`);
+        return false;
+      }
+      
+      return true;
+    });
+    
+    console.log(`✅ Filtered to ${validMedicines.length} valid medicine names (removed ${allMedicineMatches.length - validMedicines.length} invalid patterns)`);
+    
+    // Process each valid medicine
+    for (const { text: medicineText, lineIndex } of validMedicines) {
+      console.log(`\n📋 Processing medicine from line ${lineIndex + 1}: "${medicineText}"`);
+      
+      if (medicineText && medicineText.length > 2) {
+        // Remove usage instructions
+        let medicineNameOnly = medicineText;
+        const usagePatterns = [
+          /\s*-\s*(?:Sáng|Tối|Trưa|Chiều|Ngày)/i,
+          /\s*SL:\s*\d+/i,
+          /\s*Ghi\s+chú:/i,
+          /\s*Uống:/i,
+          /\s*Cách\s+dùng:/i,
+        ];
         
-        // Skip if too short or looks like a header
-        if (medicineText.length < 3 || medicineText.length > 150) continue;
+        for (const pattern of usagePatterns) {
+          const match = medicineNameOnly.match(pattern);
+          if (match && match.index !== undefined) {
+            medicineNameOnly = medicineNameOnly.substring(0, match.index).trim();
+            break;
+          }
+        }
         
-        // More flexible validation: similar to web version
-        // Only require that it contains letters (medicine names should have letters)
-        if (!/[a-zA-ZÀ-ỹ]/.test(medicineText)) continue;
-        
-        // Additional validation: prefer dosage or quantity indicator, but not required
-        // This makes it more flexible like the web version
-        const hasDosageOrQuantity = /\d+\s*(mg|g|ml|l|%|mcg|iu|ui)|SL\s*:|số lượng|so luong|:\s*\d+\s*(viên|hộp|chai|gói|lọ|tuýp|tuyp)/i.test(medicineText);
-        // If no dosage/quantity, still accept if it has numbers (could be dosage in different format)
-        // This is more permissive than before
-        if (!hasDosageOrQuantity && !/\d+/.test(medicineText) && medicineText.length < 5) {
-          // Only skip very short text without numbers
+        if (medicineNameOnly.length < 3 || !/[a-zA-ZÀ-ỹ]{3,}/.test(medicineNameOnly)) {
+          console.log(`   ⚠️ Skipped invalid medicine name (too short or no letters): "${medicineNameOnly}"`);
           continue;
         }
         
-        // Extract quantity from medicine text
+        // Clean OCR text
+        const cleanedText = cleanOcrText(medicineNameOnly);
+        
+        // Extract quantity
         const quantityMatch = medicineText.match(/SL\s*:\s*(\d+)|(\d+)\s*(viên|hộp|chai|gói|lọ|tuýp|tuyp)/i);
         const quantity = quantityMatch ? parseInt(quantityMatch[1] || quantityMatch[2]) || 1 : 1;
         
         // Remove quantity from medicine name for matching
-        const cleanMedicineText = medicineText
+        const cleanMedicineText = cleanedText
           .replace(/SL\s*:\s*\d+/gi, '')
           .replace(/x\s*\d+/gi, '')
           .replace(/\d+\s*(viên|hộp|chai|gói|lọ|tuýp|tuyp)/gi, '')
@@ -1372,8 +1786,18 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
           quantity: quantity
         });
         
-        // Step 3: Find exact match using medicine matching service
-        const exactMatch = await findExactMatch(cleanMedicineText, medicineText);
+        // Step 3: Find exact match using medicine matching service (multi search terms)
+        const searchTerms = buildSearchTerms(medicineText, cleanMedicineText);
+        let exactMatch: any = null;
+        let matchedSearchTerm: string | null = null;
+        for (const term of searchTerms) {
+          const match = await findExactMatch(term, medicineText);
+          if (match && match.product) {
+            exactMatch = match;
+            matchedSearchTerm = term;
+            break;
+          }
+        }
         
         if (exactMatch && exactMatch.product) {
           const product = exactMatch.product;
@@ -1449,8 +1873,9 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
         } else {
           // Step 4: Find similar medicines for suggestions (increased from 3 to 5)
           // Always ensure we have suggestions - the function will try multiple strategies
-          console.log(`🔍 Searching for similar medicines for: "${cleanMedicineText}" (original: "${medicineText}")`);
-          const similarMedicines = await findSimilarMedicines(cleanMedicineText, medicineText, 5);
+          const similarInput = searchTerms[0] || cleanMedicineText;
+          console.log(`🔍 Searching for similar medicines for: "${similarInput}" (original: "${medicineText}")`);
+          const similarMedicines = await findSimilarMedicines(similarInput, medicineText, 5);
           console.log(`📊 Found ${similarMedicines.length} similar medicines for "${cleanMedicineText}"`);
           
           // Always create suggestions array - findSimilarMedicines now guarantees at least some results
@@ -1631,8 +2056,16 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
           quantity: quantity
         });
         
-        // Try to find exact match
-        const exactMatch = await findExactMatch(cleanMedicineText, medicineText);
+        // Try to find exact match (multi search terms)
+        const searchTerms = buildSearchTerms(medicineText, cleanMedicineText);
+        let exactMatch: any = null;
+        for (const term of searchTerms) {
+          const match = await findExactMatch(term, medicineText);
+          if (match && match.product) {
+            exactMatch = match;
+            break;
+          }
+        }
         
         if (exactMatch && exactMatch.product) {
           const product = exactMatch.product;
@@ -1667,8 +2100,9 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
           }
         } else {
           // Find similar medicines for suggestions
-          console.log(`🔍 Fallback: Searching for similar medicines for: "${cleanMedicineText}"`);
-          const similarMedicines = await findSimilarMedicines(cleanMedicineText, medicineText, 5);
+          const similarInput = searchTerms[0] || cleanMedicineText;
+          console.log(`🔍 Fallback: Searching for similar medicines for: "${similarInput}"`);
+          const similarMedicines = await findSimilarMedicines(similarInput, medicineText, 5);
           console.log(`📊 Fallback: Found ${similarMedicines.length} similar medicines`);
           
           const suggestions = similarMedicines.map((p: any) => {

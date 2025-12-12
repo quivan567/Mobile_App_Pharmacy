@@ -494,6 +494,11 @@ export default function ConsultationScreen() {
       if (response.success && response.data) {
         setAnalysisResult(response.data);
         
+        // Update scannedInfo from analysis result if available
+        if (response.data.extractedInfo) {
+          setScannedInfo(response.data.extractedInfo);
+        }
+        
         // Log analysis result for debugging
         logger.log('=== Analysis Result ===');
         logger.log('Found medicines:', response.data.foundMedicines?.length || 0);
@@ -930,17 +935,33 @@ export default function ConsultationScreen() {
               <Text style={styles.autoFillText}>Đã quét từ ảnh (OCR)</Text>
             </View>
           </View>
+          {scannedInfo.customerName && (
+            <Text style={styles.noteText}>Họ tên: {scannedInfo.customerName}</Text>
+          )}
+          {scannedInfo.phoneNumber && (
+            <Text style={styles.noteText}>Số điện thoại: {scannedInfo.phoneNumber}</Text>
+          )}
           {scannedInfo.doctorName && (
             <Text style={styles.noteText}>Bác sĩ: {scannedInfo.doctorName}</Text>
           )}
           {scannedInfo.hospitalName && (
             <Text style={styles.noteText}>Bệnh viện/Phòng khám: {scannedInfo.hospitalName}</Text>
           )}
+          {scannedInfo.examinationDate && (
+            <Text style={styles.noteText}>
+              Ngày khám: {(() => {
+                // Format date from YYYY-MM-DD to DD/MM/YYYY
+                const dateStr = scannedInfo.examinationDate;
+                if (dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) {
+                  const [year, month, day] = dateStr.split('-');
+                  return `${day}/${month}/${year}`;
+                }
+                return dateStr;
+              })()}
+            </Text>
+          )}
           {scannedInfo.diagnosis && (
             <Text style={styles.noteText}>Chẩn đoán: {scannedInfo.diagnosis}</Text>
-          )}
-          {scannedInfo.examinationDate && (
-            <Text style={styles.noteText}>Ngày khám: {scannedInfo.examinationDate}</Text>
           )}
           {scannedInfo.notes && (
             <Text style={styles.noteText}>Ghi chú: {scannedInfo.notes}</Text>
