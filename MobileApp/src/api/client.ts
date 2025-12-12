@@ -34,6 +34,15 @@ class ApiClient {
           config.headers.Authorization = `Bearer ${token}`;
         }
         
+        // Increase timeout for analyze endpoint (OCR + analysis takes longer)
+        if (config.url?.includes('/api/consultation/analyze')) {
+          config.timeout = 120000; // 2 minutes for OCR + analysis
+          logger.log('API Request - Analyze (extended timeout):', {
+            url: config.url,
+            timeout: config.timeout,
+          });
+        }
+        
         // Debug logging for orders endpoint
         if (config.url?.includes('/api/orders')) {
           logger.log('API Request - Orders:', {
@@ -73,6 +82,7 @@ class ApiClient {
             hasParts: config.data?._parts !== undefined,
             headers: config.headers,
             contentType: config.headers['Content-Type'],
+            timeout: config.timeout,
           });
         }
         
@@ -85,12 +95,41 @@ class ApiClient {
 
     // Response interceptor to handle errors
     this.client.interceptors.response.use(
-      (response) => response,
+      (response) => {
+        // Log successful analyze responses for debugging
+        if (response.config.url?.includes('/api/consultation/analyze')) {
+          logger.log('API Response - Analyze (success):', {
+            status: response.status,
+            hasData: !!response.data,
+            dataKeys: response.data ? Object.keys(response.data) : [],
+          });
+        }
+        return response;
+      },
       async (error: AxiosError) => {
         // Handle network errors
         if (!error.response) {
           // Network error or timeout
           const errorMessage = error.message || 'Unknown error';
+          const isTimeout = errorMessage.includes('timeout') || errorMessage.includes('Timeout');
+          
+          // Special handling for analyze endpoint timeout
+          if (error.config?.url?.includes('/api/consultation/analyze')) {
+            logger.error('Analyze endpoint timeout:', {
+              message: errorMessage,
+              url: error.config.url,
+              timeout: error.config.timeout,
+            });
+            
+            Toast.show({
+              type: 'error',
+              text1: 'Hết thời gian chờ',
+              text2: 'Quá trình phân tích mất quá nhiều thời gian. Vui lòng thử lại.',
+              visibilityTime: 6000,
+            });
+            return Promise.reject(error);
+          }
+          
           const isLocalhost = API_BASE_URL.includes('localhost') || API_BASE_URL.includes('127.0.0.1');
           
           let errorText = 'Không thể kết nối đến server.';
@@ -117,12 +156,13 @@ class ApiClient {
             syscall: (error as any).syscall,
             address: (error as any).address,
             port: (error as any).port,
+            isTimeout,
           });
           
           // Additional diagnostic info
           if ((error as any).code === 'ECONNREFUSED') {
             logger.error('Connection Refused - Backend may not be running or IP/Port incorrect');
-          } else if ((error as any).code === 'ETIMEDOUT') {
+          } else if ((error as any).code === 'ETIMEDOUT' || isTimeout) {
             logger.error('Connection Timeout - Backend may be slow or unreachable');
           } else if ((error as any).code === 'ENOTFOUND') {
             logger.error('DNS Error - Cannot resolve hostname');

@@ -409,11 +409,61 @@ export const consultationApi = {
     // Option 2: Send prescriptionId (image already in database)
     if (data.prescriptionId) {
       console.log('Sending analyze request with prescriptionId:', data.prescriptionId);
-      return apiClient.post('/api/consultation/analyze', {
-        prescriptionId: data.prescriptionId,
-        prescriptionText: data.prescriptionText,
-        notes: data.notes,
-      });
+      
+      // Use fetch API with longer timeout for OCR + analysis (same as file upload)
+      // Production may have slower network, so need longer timeout
+      const token = await (await import('../utils/storage')).authStorage.getToken();
+      const { API_BASE_URL } = await import('../utils/constants');
+      
+      const headers: any = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+      
+      // Set timeout to 120 seconds (2 minutes) for OCR + analysis
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 seconds
+      
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/consultation/analyze`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            prescriptionId: data.prescriptionId,
+            prescriptionText: data.prescriptionText,
+            notes: data.notes,
+          }),
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
+        
+        console.log('Response status:', response.status);
+        console.log('Response ok:', response.ok);
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+          console.error('Error response:', errorData);
+          throw new Error(errorData.message || `HTTP ${response.status}`);
+        }
+        
+        const responseData = await response.json();
+        console.log('Response data:', responseData);
+        
+        return {
+          success: responseData.success,
+          data: responseData.data,
+          message: responseData.message,
+        };
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          throw new Error('Quá trình phân tích mất quá nhiều thời gian. Vui lòng thử lại với ảnh rõ hơn.');
+        }
+        throw fetchError;
+      }
     }
 
     throw new Error('Either prescriptionId or imageUrl is required');
