@@ -7,6 +7,10 @@ import { config } from '../config/index.js';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 import { OTPService } from '../services/otpService.js';
 import { FirebasePhoneService, FirebaseGoogleService, initializeFirebase } from '../services/firebaseService.js';
+import {
+  uploadToSupabase,
+  STORAGE_BUCKETS,
+} from '../services/supabaseService.js';
 
 // In-memory OTP storage (in production, use Redis or database)
 const otpStorage = new Map<string, { otp: string; expiresAt: Date; phone: string }>();
@@ -246,7 +250,29 @@ export class AuthController {
       let avatarPath = undefined;
       if (req.file) {
         // File is saved to disk by multer, path is relative to project root
-        avatarPath = `uploads/avatars/${req.file.filename}`;
+        const localPath = `uploads/avatars/${req.file.filename}`;
+        
+        // Upload to Supabase Storage (if configured)
+        try {
+          const supabaseResult = await uploadToSupabase(
+            STORAGE_BUCKETS.AVATARS,
+            req.file.path,
+            `avatar-${Date.now()}-${Math.round(Math.random() * 1E9)}${req.file.originalname.substring(req.file.originalname.lastIndexOf('.'))}`,
+            {
+              contentType: req.file.mimetype,
+            }
+          );
+          if (supabaseResult) {
+            avatarPath = supabaseResult.url;
+            console.log('✅ Avatar uploaded to Supabase:', avatarPath);
+          } else {
+            avatarPath = localPath; // Fallback to local path
+          }
+        } catch (supabaseError: any) {
+          console.warn('⚠️ Supabase upload failed, using local path:', supabaseError.message);
+          avatarPath = localPath; // Fallback to local path
+        }
+        
         console.log('Avatar file received:', req.file.filename, req.file.size);
       }
 
@@ -768,9 +794,26 @@ export class AuthController {
       // Handle avatar upload if provided
       let avatarUrl = undefined;
       if (req.file) {
-        // For now, we'll just store the file info
-        // In production, you'd upload to cloud storage (AWS S3, Cloudinary, etc.)
-        avatarUrl = `uploads/avatars/${req.file.originalname}`;
+        // Upload to Supabase Storage (if configured)
+        try {
+          const supabaseResult = await uploadToSupabase(
+            STORAGE_BUCKETS.AVATARS,
+            req.file.path,
+            `avatar-${Date.now()}-${Math.round(Math.random() * 1E9)}${req.file.originalname.substring(req.file.originalname.lastIndexOf('.'))}`,
+            {
+              contentType: req.file.mimetype,
+            }
+          );
+          if (supabaseResult) {
+            avatarUrl = supabaseResult.url;
+            console.log('✅ Avatar uploaded to Supabase:', avatarUrl);
+          } else {
+            avatarUrl = `uploads/avatars/${req.file.originalname}`; // Fallback to local path
+          }
+        } catch (supabaseError: any) {
+          console.warn('⚠️ Supabase upload failed, using local path:', supabaseError.message);
+          avatarUrl = `uploads/avatars/${req.file.originalname}`; // Fallback to local path
+        }
         console.log('Avatar file received:', req.file.originalname, req.file.size);
       }
 

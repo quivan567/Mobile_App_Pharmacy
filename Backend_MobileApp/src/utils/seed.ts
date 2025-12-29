@@ -67,7 +67,7 @@ const seedData = async () => {
         inStock: true,
         stockQuantity: 100,
         isHot: true,
-        isNew: false,
+        isNewProduct: false,
         isPrescription: false,
       },
       {
@@ -83,7 +83,7 @@ const seedData = async () => {
         inStock: true,
         stockQuantity: 50,
         isHot: true,
-        isNew: true,
+        isNewProduct: true,
         isPrescription: false,
       },
       {
@@ -99,7 +99,7 @@ const seedData = async () => {
         inStock: true,
         stockQuantity: 30,
         isHot: false,
-        isNew: true,
+        isNewProduct: true,
         isPrescription: false,
       },
       {
@@ -115,7 +115,7 @@ const seedData = async () => {
         inStock: true,
         stockQuantity: 25,
         isHot: false,
-        isNew: false,
+        isNewProduct: false,
         isPrescription: false,
       },
       {
@@ -131,7 +131,7 @@ const seedData = async () => {
         inStock: true,
         stockQuantity: 40,
         isHot: true,
-        isNew: false,
+        isNewProduct: false,
         isPrescription: false,
       },
     ]);

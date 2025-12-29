@@ -9,7 +9,7 @@ export class CartController {
       const cartItems = await Cart.find({ userId: req.user!.id })
         .populate({
           path: 'productId',
-          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNew',
+          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNewProduct',
         })
         .lean();
 
@@ -89,7 +89,7 @@ export class CartController {
       const existingItem = await Cart.findOne({ userId: req.user!.id, productId })
         .populate({
           path: 'productId',
-          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNew',
+          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNewProduct',
         });
 
       if (existingItem) {
@@ -111,7 +111,7 @@ export class CartController {
         // Re-populate to ensure product data is included
         await existingItem.populate({
           path: 'productId',
-          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNew',
+          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNewProduct',
         });
 
         return res.json({
@@ -129,7 +129,7 @@ export class CartController {
 
         await newItem.populate({
           path: 'productId',
-          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNew',
+          select: 'name imageUrl price unit description brand inStock stockQuantity isHot isNewProduct',
         });
 
         return res.status(201).json({

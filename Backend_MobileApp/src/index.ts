@@ -216,7 +216,18 @@ const medicineImageMatcher = (req: express.Request, res: express.Response, next:
         .replace(/[^a-z0-9]/g, '');
     };
     
+    // Extract base name (first word or first few words) for better matching
+    // Example: "Simethicon.jpg" -> "simethicon", "Simethicon_B_80mg.jpg" -> "simethicon"
+    const extractBaseName = (name: string) => {
+      const normalized = normalizeName(name);
+      // Take first 8-12 characters as base name (most medicine names are in this range)
+      // This helps match "Simethicon" with "Simethicon_B" or "Simethicon_80mg"
+      const words = normalized.split(/\d+/); // Split by numbers to get base name
+      return words[0] || normalized.substring(0, 12);
+    };
+    
     const requestedNormalized = normalizeName(requestedFileName);
+    const requestedBaseName = extractBaseName(requestedFileName);
     
     // Try to find file with similar name
     let similarFile: string | undefined;
@@ -225,11 +236,21 @@ const medicineImageMatcher = (req: express.Request, res: express.Response, next:
     
     for (const file of files) {
       const fileNormalized = normalizeName(file);
+      const fileBaseName = extractBaseName(file);
       
       // Exact match (ignoring extension and case)
       if (fileNormalized === requestedNormalized) {
         similarFile = file;
         break;
+      }
+      
+      // Base name match (e.g., "simethicon" matches "simethiconb" or "simethicon80mg")
+      if (fileBaseName === requestedBaseName && requestedBaseName.length >= 5) {
+        const score = 0.9; // High score for base name match
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = file;
+        }
       }
       
       // Check if one contains the other (partial match)
@@ -240,6 +261,22 @@ const medicineImageMatcher = (req: express.Request, res: express.Response, next:
         );
         if (score > bestScore && score > 0.5) { // At least 50% match
           bestScore = score;
+          bestMatch = file;
+        }
+      }
+      
+      // Check if base names are similar (handles variations like "simethicon" vs "simethiconb")
+      if (fileBaseName.length >= 5 && requestedBaseName.length >= 5) {
+        const baseNameSimilarity = Math.min(
+          fileBaseName.length / requestedBaseName.length,
+          requestedBaseName.length / fileBaseName.length
+        );
+        // Check if one base name starts with the other (e.g., "simethicon" starts with "simethiconb" base)
+        const startsWithMatch = fileBaseName.startsWith(requestedBaseName.substring(0, Math.min(8, requestedBaseName.length))) ||
+                                requestedBaseName.startsWith(fileBaseName.substring(0, Math.min(8, fileBaseName.length)));
+        
+        if (startsWithMatch && baseNameSimilarity > 0.7 && baseNameSimilarity > bestScore) {
+          bestScore = baseNameSimilarity;
           bestMatch = file;
         }
       }

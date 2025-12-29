@@ -24,11 +24,13 @@ import { openMomoPayment } from '../../utils/momoHelper';
 import { useQuery } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { TouchableOpacity, Modal, FlatList } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { logger } from '../../utils/logger';
 import { retryWithBackoffAndFeedback, parseError } from '../../utils/errorHandler';
 
 export default function CheckoutScreen() {
   const navigation = useNavigation();
+  const insets = useSafeAreaInsets();
   const { items, subtotal, clearCart } = useCart();
   const { user } = useAuth();
   const [isProcessing, setIsProcessing] = useState(false);
@@ -598,7 +600,7 @@ export default function CheckoutScreen() {
         >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
-              <View style={styles.modalHeader}>
+              <View style={[styles.modalHeader, { paddingTop: Math.max(insets.top, 16) }]}>
                 <Text style={styles.modalTitle}>Chọn địa chỉ</Text>
                 <TouchableOpacity
                   onPress={() => setShowAddressPicker(false)}

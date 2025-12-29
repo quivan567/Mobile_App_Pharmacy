@@ -9,6 +9,9 @@ import {
   Alert,
   Modal,
   FlatList,
+  SafeAreaView,
+  StatusBar,
+  Platform,
 } from 'react-native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as ImagePicker from 'expo-image-picker';
@@ -38,6 +41,22 @@ export default function ConsultationScreen() {
   const [notes, setNotes] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalyzePrescriptionResponse | null>(null);
+  
+  // Debug: Log when analysisResult changes
+  useEffect(() => {
+    if (analysisResult) {
+      console.log('🔄 analysisResult changed/updated');
+      console.log('  prescriptionMedicines:', analysisResult.prescriptionMedicines);
+      console.log('  prescriptionMedicines length:', analysisResult.prescriptionMedicines?.length || 0);
+      if (analysisResult.prescriptionMedicines) {
+        const withoutMatch = analysisResult.prescriptionMedicines.filter(item => !item.hasMatch);
+        console.log('  prescriptionMedicines without match:', withoutMatch.length);
+        withoutMatch.forEach((item: any, idx: number) => {
+          console.log(`    [${idx}] "${item.originalText}", hasMatch: ${item.hasMatch}`);
+        });
+      }
+    }
+  }, [analysisResult]);
   const [showAnalysisModal, setShowAnalysisModal] = useState(false);
   const [showOrderModal, setShowOrderModal] = useState(false);
   const [selectedItems, setSelectedItems] = useState<Array<{ productId: string; quantity: number }>>([]);
@@ -492,6 +511,19 @@ export default function ConsultationScreen() {
       logger.log('Response:', JSON.stringify(response, null, 2));
       
       if (response.success && response.data) {
+        // Log BEFORE setting to see raw data
+        console.log('=== BEFORE setAnalysisResult ===');
+        console.log('response.data.prescriptionMedicines:', response.data.prescriptionMedicines);
+        console.log('prescriptionMedicines length:', response.data.prescriptionMedicines?.length || 0);
+        if (response.data.prescriptionMedicines) {
+          const withMatch = response.data.prescriptionMedicines.filter((item: any) => item.hasMatch).length;
+          const withoutMatch = response.data.prescriptionMedicines.filter((item: any) => !item.hasMatch).length;
+          console.log(`  hasMatch=true: ${withMatch}, hasMatch=false: ${withoutMatch}`);
+          response.data.prescriptionMedicines.forEach((item: any, idx: number) => {
+            console.log(`  [${idx}] "${item.originalText}", hasMatch: ${item.hasMatch}, suggestions: ${item.suggestions?.length || 0}`);
+          });
+        }
+        
         setAnalysisResult(response.data);
         
         // Update scannedInfo from analysis result if available
@@ -503,6 +535,15 @@ export default function ConsultationScreen() {
         logger.log('=== Analysis Result ===');
         logger.log('Found medicines:', response.data.foundMedicines?.length || 0);
         logger.log('Not found medicines:', response.data.notFoundMedicines?.length || 0);
+        logger.log('Prescription medicines:', response.data.prescriptionMedicines?.length || 0);
+        if (response.data.prescriptionMedicines) {
+          const withMatch = response.data.prescriptionMedicines.filter((item: any) => item.hasMatch).length;
+          const withoutMatch = response.data.prescriptionMedicines.filter((item: any) => !item.hasMatch).length;
+          logger.log(`  PrescriptionMedicines - hasMatch: ${withMatch}, !hasMatch: ${withoutMatch}`);
+          response.data.prescriptionMedicines.forEach((item: any, idx: number) => {
+            logger.log(`  PrescriptionMed ${idx + 1}: "${item.originalText}", hasMatch: ${item.hasMatch}, suggestions: ${item.suggestions?.length || 0}`);
+          });
+        }
         if (response.data.notFoundMedicines) {
           response.data.notFoundMedicines.forEach((item: any, idx: number) => {
             logger.log(`  Not found ${idx + 1}: "${item.originalText}"`);
@@ -1030,7 +1071,8 @@ export default function ConsultationScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowAnalysisModal(false)}
       >
-        <View style={styles.modalContainer}>
+        <SafeAreaView style={styles.modalContainer} edges={['top']}>
+          <StatusBar barStyle="dark-content" backgroundColor="#fff" />
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Kết quả phân tích</Text>
             <View style={styles.modalHeaderActions}>
@@ -1212,162 +1254,334 @@ export default function ConsultationScreen() {
                   </View>
                 )}
 
-                {/* Hiển thị thuốc đề xuất (chỉ khi không có thuốc trùng khớp) */}
-                {analysisResult.foundMedicines.length === 0 && (() => {
-                  // Lọc chỉ lấy các notFoundMedicines có suggestions
-                  const notFoundWithSuggestions = analysisResult.notFoundMedicines?.filter(
-                    item => item && item.suggestions && Array.isArray(item.suggestions) && item.suggestions.length > 0
-                  ) || [];
-                  
-                  // Debug logging
-                  logger.log('=== Rendering Suggestions ===');
-                  logger.log('foundMedicines.length:', analysisResult.foundMedicines?.length || 0);
-                  logger.log('notFoundMedicines.length:', analysisResult.notFoundMedicines?.length || 0);
-                  logger.log('notFoundWithSuggestions.length:', notFoundWithSuggestions.length);
-                  notFoundWithSuggestions.forEach((item, idx) => {
-                    console.log(`  Item ${idx + 1}: "${item.originalText}", suggestions: ${item.suggestions?.length || 0}`);
-                  });
-                  
-                  if (notFoundWithSuggestions.length === 0) {
-                    console.log('⚠️ No suggestions to display');
-                    return null;
+                {/* Thuốc đề xuất - Suggested medicines (not found in database) */}
+                {(() => {
+                  // Debug logging - check if analysisResult exists
+                  if (!analysisResult) {
+                    console.log('❌ analysisResult is null/undefined');
+                    return false;
                   }
                   
-                  // Flatten all suggestions from all notFoundMedicines
-                  const allSuggestions: any[] = [];
-                  notFoundWithSuggestions.forEach(item => {
-                    if (item.suggestions && Array.isArray(item.suggestions)) {
-                      item.suggestions.forEach(suggestion => {
-                        if (suggestion && suggestion.productId) {
-                          // Avoid duplicates
-                          if (!allSuggestions.find(s => s.productId === suggestion.productId)) {
-                            allSuggestions.push(suggestion);
-                          }
-                        }
-                      });
-                    }
-                  });
+                  const prescriptionMedicinesWithoutMatch = analysisResult.prescriptionMedicines?.filter(item => !item.hasMatch) || [];
+                  const hasNotFoundMedicines = analysisResult.notFoundMedicines && analysisResult.notFoundMedicines.length > 0;
                   
-                  console.log(`✅ Total unique suggestions to display: ${allSuggestions.length}`);
+                  console.log('=== Rendering Thuốc đề xuất ===');
+                  console.log('analysisResult exists:', !!analysisResult);
+                  console.log('analysisResult.prescriptionMedicines:', analysisResult.prescriptionMedicines);
+                  console.log('prescriptionMedicines type:', typeof analysisResult.prescriptionMedicines);
+                  console.log('prescriptionMedicines is array:', Array.isArray(analysisResult.prescriptionMedicines));
+                  console.log('prescriptionMedicines total:', analysisResult.prescriptionMedicines?.length || 0);
+                  console.log('prescriptionMedicines without match:', prescriptionMedicinesWithoutMatch.length);
+                  console.log('notFoundMedicines:', analysisResult.notFoundMedicines?.length || 0);
                   
-                  if (allSuggestions.length === 0) {
-                    console.log('⚠️ No valid suggestions after flattening');
-                    return null;
+                  if (prescriptionMedicinesWithoutMatch.length > 0) {
+                    console.log('✅ Found prescriptionMedicines without match, showing section');
+                    prescriptionMedicinesWithoutMatch.forEach((item: any, idx: number) => {
+                      console.log(`  Item ${idx + 1}: "${item.originalText}", hasMatch: ${item.hasMatch}, suggestions: ${item.suggestions?.length || 0}, suggestionText: ${item.suggestionText ? 'yes' : 'no'}`);
+                    });
+                    return true; // Show section if we have prescriptionMedicines without match
+                  } else if (hasNotFoundMedicines) {
+                    // Fallback: If prescriptionMedicines is empty but notFoundMedicines exists, convert them
+                    console.log('⚠️ No prescriptionMedicines without match, but notFoundMedicines exists. Converting...');
+                    return true; // Show section, we'll convert notFoundMedicines below
                   }
-                  
-                  return (
-                    <View style={styles.medicinesContainer}>
-                      <View style={styles.sectionHeader}>
-                        <Ionicons name="search" size={20} color={COLORS.warning} />
-                        <Text style={styles.sectionTitle}>Đề xuất thuốc tương tự ({allSuggestions.length})</Text>
-                      </View>
-                      {allSuggestions.map((suggestion, sIndex) => {
-                        if (!suggestion || !suggestion.productId) {
-                          console.log(`⚠️ Skipping invalid suggestion at index ${sIndex}`);
-                          return null;
-                        }
-                        
-                        const isSelected = selectedItems.some(
-                          item => item.productId === suggestion.productId
-                        );
-                        const selectedItem = selectedItems.find(
-                          item => item.productId === suggestion.productId
-                        );
-                        
-                        return (
-                          <View key={`suggestion-${suggestion.productId}-${sIndex}`} style={styles.suggestionCard}>
-                            <View style={styles.suggestionInfo}>
-                              <Text style={styles.suggestionName}>{suggestion.productName || 'Không xác định'}</Text>
-                              <Text style={styles.suggestionPrice}>
-                                {suggestion.price ? suggestion.price.toLocaleString('vi-VN') : '0'} ₫ / {suggestion.unit || 'sản phẩm'}
+                  console.log('❌ No items to show in Thuốc đề xuất section');
+                  return false;
+                })() && (
+                  <View style={styles.medicinesContainer}>
+                    <View style={styles.sectionHeader}>
+                      <Ionicons name="alert-circle" size={20} color={COLORS.warning} />
+                      <Text style={styles.sectionTitle}>Thuốc đề xuất</Text>
+                    </View>
+                    
+                    {(() => {
+                      // Use prescriptionMedicines if available, otherwise convert notFoundMedicines
+                      const prescriptionMedicinesWithoutMatch = analysisResult.prescriptionMedicines?.filter((item: any) => {
+                        const hasMatchValue = item.hasMatch;
+                        console.log(`  Filtering item: "${item.originalText}", hasMatch: ${hasMatchValue}, type: ${typeof hasMatchValue}`);
+                        return hasMatchValue === false || hasMatchValue === undefined || !hasMatchValue;
+                      }) || [];
+                      
+                      console.log('  Filtered prescriptionMedicinesWithoutMatch:', prescriptionMedicinesWithoutMatch.length);
+                      
+                      if (prescriptionMedicinesWithoutMatch.length > 0) {
+                        console.log('  ✅ Using prescriptionMedicinesWithoutMatch');
+                        return prescriptionMedicinesWithoutMatch;
+                      } else if (analysisResult.notFoundMedicines && analysisResult.notFoundMedicines.length > 0) {
+                        // Fallback: Convert notFoundMedicines to prescriptionMedicines format
+                        console.log('🔄 Converting notFoundMedicines to prescriptionMedicines format...');
+                        return analysisResult.notFoundMedicines.map((med: any) => ({
+                          originalText: med.originalText,
+                          originalDosage: med.originalDosage,
+                          matchedProduct: null,
+                          suggestions: med.suggestions || [],
+                          hasMatch: false,
+                          suggestionText: med.suggestions && med.suggestions.length > 0 
+                            ? `Không tìm thấy chính xác tên thuốc "${med.originalText}" trong hệ thống. Dưới đây là các thuốc tương tự.`
+                            : `Không tìm thấy chính xác tên thuốc "${med.originalText}" trong hệ thống. Vui lòng liên hệ dược sĩ để được tư vấn về thuốc này.`
+                        }));
+                      }
+                      console.log('  ❌ No items to map');
+                      return [];
+                    })().map((item: any, index: number) => {
+                      console.log(`  Mapping item ${index}: "${item.originalText}", hasMatch: ${item.hasMatch}`);
+                      return (
+                        <View key={`prescription-med-${index}`} style={styles.suggestionSectionCard}>
+                          <View style={styles.suggestionSectionHeader}>
+                            <Text style={styles.suggestionSectionTitle}>
+                              Thuốc trong đơn: <Text style={styles.suggestionSectionTitleHighlight}>"{item.originalText}"</Text>
+                            </Text>
+                            {item.originalDosage && (
+                              <Text style={styles.suggestionSectionDosage}>
+                                Hàm lượng: {item.originalDosage}
                               </Text>
-                              <View style={styles.suggestionMeta}>
-                                {suggestion.confidence !== undefined && (
-                                  <View style={styles.confidenceBadge}>
-                                    <Ionicons 
-                                      name="checkmark-circle" 
-                                      size={12} 
-                                      color={suggestion.confidence >= 0.8 ? COLORS.success : suggestion.confidence >= 0.6 ? COLORS.warning : COLORS.error} 
-                                    />
-                                    <Text style={[
-                                      styles.confidenceText,
-                                      { color: suggestion.confidence >= 0.8 ? COLORS.success : suggestion.confidence >= 0.6 ? COLORS.warning : COLORS.error }
-                                    ]}>
-                                      {(suggestion.confidence * 100).toFixed(0)}% khớp
-                                    </Text>
-                                  </View>
-                                )}
-                                {suggestion.matchReason && (
-                                  <Text style={styles.matchReason}>
-                                    {suggestion.matchReason === 'same_name_same_dosage' && 'Cùng tên, cùng liều'}
-                                    {suggestion.matchReason === 'same_name_different_dosage' && 'Cùng tên, khác liều'}
-                                    {suggestion.matchReason === 'similar_name' && 'Tên tương tự'}
-                                    {suggestion.matchReason === 'partial_name_match' && 'Tên gần giống'}
-                                    {suggestion.matchReason === 'keyword_match' && 'Khớp từ khóa'}
-                                    {suggestion.matchReason === 'popular_medicine' && 'Thuốc phổ biến'}
-                                    {suggestion.matchReason === 'general_suggestion' && 'Đề xuất chung'}
-                                  </Text>
-                                )}
-                              </View>
+                            )}
+                          </View>
+                          
+                          {/* Hiển thị suggestionText nếu có */}
+                          {item.suggestionText && (
+                            <View style={styles.suggestionTextContainer}>
+                              <Text style={styles.suggestionText}>
+                                {item.suggestionText}
+                              </Text>
                             </View>
-                            <View style={styles.suggestionActions}>
-                              {isSelected ? (
-                                <View style={styles.quantitySelector}>
-                                  <TouchableOpacity
-                                    style={styles.quantityButton}
-                                    onPress={() => {
-                                      if (selectedItem && selectedItem.quantity > 1) {
-                                        setSelectedItems(selectedItems.map(item =>
-                                          item.productId === suggestion.productId
-                                            ? { ...item, quantity: item.quantity - 1 }
-                                            : item
-                                        ));
-                                      } else {
-                                        setSelectedItems(selectedItems.filter(
-                                          item => item.productId !== suggestion.productId
-                                        ));
-                                      }
-                                    }}
-                                  >
-                                    <Ionicons name="remove" size={16} color={COLORS.text} />
-                                  </TouchableOpacity>
-                                  <Text style={styles.quantityText}>
-                                    {selectedItem?.quantity || 0}
-                                  </Text>
-                                  <TouchableOpacity
-                                    style={styles.quantityButton}
-                                    onPress={() => {
-                                      setSelectedItems(selectedItems.map(item =>
-                                        item.productId === suggestion.productId
-                                          ? { ...item, quantity: item.quantity + 1 }
-                                          : item
-                                      ));
-                                    }}
-                                  >
-                                    <Ionicons name="add" size={16} color={COLORS.text} />
-                                  </TouchableOpacity>
-                                </View>
-                              ) : (
+                          )}
+                          
+                          {item.suggestions && item.suggestions.length > 0 ? (
+                            <>
+                              <View style={styles.addAllButtonContainer}>
                                 <TouchableOpacity
-                                  style={styles.addSuggestionButton}
+                                  style={styles.addAllButton}
                                   onPress={() => {
-                                    setSelectedItems([...selectedItems, {
+                                    const newItems = item.suggestions.map((suggestion: any) => ({
                                       productId: suggestion.productId,
                                       quantity: 1,
-                                    }]);
+                                    }));
+                                    // Merge with existing items, avoiding duplicates
+                                    const existingIds = new Set(selectedItems.map(i => i.productId));
+                                    const uniqueNewItems = newItems.filter((i: any) => !existingIds.has(i.productId));
+                                    setSelectedItems([...selectedItems, ...uniqueNewItems]);
                                   }}
                                 >
-                                  <Ionicons name="add" size={16} color={COLORS.primary} />
-                                  <Text style={styles.addSuggestionText}>Thêm</Text>
+                                  <Ionicons name="cart" size={16} color="#fff" />
+                                  <Text style={styles.addAllButtonText}>
+                                    Thêm tất cả ({item.suggestions.length} thuốc)
+                                  </Text>
                                 </TouchableOpacity>
-                              )}
-                            </View>
-                          </View>
-                        );
-                      })}
-                    </View>
-                  );
-                })()}
+                              </View>
+                              
+                              <View style={styles.suggestionsList}>
+                                {item.suggestions.map((suggestion: any, idx: number) => {
+                                  if (!suggestion || !suggestion.productId) {
+                                    return null;
+                                  }
+                                  
+                                  const isSelected = selectedItems.some(
+                                    item => item.productId === suggestion.productId
+                                  );
+                                  const selectedItem = selectedItems.find(
+                                    item => item.productId === suggestion.productId
+                                  );
+                                  
+                                  return (
+                                    <View key={`suggestion-${suggestion.productId}-${idx}`} style={styles.suggestionCard}>
+                                      <View style={styles.suggestionInfo}>
+                                        <Text style={styles.suggestionName}>{suggestion.productName || 'Không xác định'}</Text>
+                                        <Text style={styles.suggestionPrice}>
+                                          {suggestion.price ? suggestion.price.toLocaleString('vi-VN') : '0'} ₫ / {suggestion.unit || 'sản phẩm'}
+                                        </Text>
+                                        {suggestion.dosage && (
+                                          <Text style={styles.suggestionDosage}>
+                                            Hàm lượng: {suggestion.dosage}
+                                          </Text>
+                                        )}
+                                        
+                                        {/* Công dụng (indication) */}
+                                        {suggestion.indication && (
+                                          <Text style={styles.suggestionIndication}>
+                                            <Text style={styles.suggestionDetailLabel}>Công dụng:</Text> {suggestion.indication}
+                                          </Text>
+                                        )}
+                                        
+                                        {/* Thông tin chi tiết dược học */}
+                                        <View style={styles.suggestionDetails}>
+                                          {suggestion.category && (
+                                            <Text style={styles.suggestionDetailText}>
+                                              <Text style={styles.suggestionDetailLabel}>Danh mục:</Text> {suggestion.category}
+                                            </Text>
+                                          )}
+                                          {suggestion.subcategory && (
+                                            <Text style={styles.suggestionDetailText}>
+                                              <Text style={styles.suggestionDetailLabel}>Nhóm thuốc:</Text> {suggestion.subcategory}
+                                            </Text>
+                                          )}
+                                          {suggestion.dosageForm && (
+                                            <Text style={styles.suggestionDetailText}>
+                                              <Text style={styles.suggestionDetailLabel}>Dạng bào chế:</Text> {suggestion.dosageForm}
+                                            </Text>
+                                          )}
+                                          {suggestion.route && (
+                                            <Text style={styles.suggestionDetailText}>
+                                              <Text style={styles.suggestionDetailLabel}>Cách dùng:</Text> {suggestion.route}
+                                            </Text>
+                                          )}
+                                        </View>
+
+                                        {/* Chống chỉ định - Hiển thị nổi bật */}
+                                        {suggestion.contraindication && (
+                                          <View style={styles.contraindicationBox}>
+                                            <View style={styles.contraindicationHeader}>
+                                              <Ionicons name="warning" size={16} color={COLORS.error} />
+                                              <Text style={styles.contraindicationTitle}>Chống chỉ định</Text>
+                                            </View>
+                                            <Text style={styles.contraindicationText}>
+                                              {suggestion.contraindication}
+                                            </Text>
+                                          </View>
+                                        )}
+
+                                        {/* Mô tả */}
+                                        {suggestion.description && 
+                                         suggestion.description !== suggestion.indication &&
+                                         !/^\s*\d+(?:\.\d+)?\s*(?:mg|g|ml|l|mcg|iu|ui|%)(?:\s*[+\/]\s*\d+(?:\.\d+)?\s*(?:mg|g|ml|l|mcg|iu|ui|%)?)?\s*$/i.test(suggestion.description.trim()) && (
+                                          <Text style={styles.suggestionDescription}>
+                                            {suggestion.description}
+                                          </Text>
+                                        )}
+
+                                        {/* Badge thông tin */}
+                                        <View style={styles.suggestionBadges}>
+                                          {suggestion.category && (
+                                            <View style={styles.infoBadge}>
+                                              <Ionicons name="folder-outline" size={12} color={COLORS.primary} />
+                                              <Text style={styles.infoBadgeText}>{suggestion.category}</Text>
+                                            </View>
+                                          )}
+                                          {suggestion.subcategory && (
+                                            <View style={[styles.infoBadge, { backgroundColor: '#e0e7ff' }]}>
+                                              <Ionicons name="pricetag-outline" size={12} color="#4f46e5" />
+                                              <Text style={[styles.infoBadgeText, { color: '#4f46e5' }]}>
+                                                {suggestion.subcategory}
+                                              </Text>
+                                            </View>
+                                          )}
+                                          {suggestion.dosageForm && (
+                                            <View style={[styles.infoBadge, { backgroundColor: '#dcfce7' }]}>
+                                              <Ionicons name="medical-outline" size={12} color="#16a34a" />
+                                              <Text style={[styles.infoBadgeText, { color: '#16a34a' }]}>
+                                                {suggestion.dosageForm}
+                                              </Text>
+                                            </View>
+                                          )}
+                                          {suggestion.route && (
+                                            <View style={[styles.infoBadge, { backgroundColor: '#fff7ed' }]}>
+                                              <Ionicons name="location-outline" size={12} color="#ea580c" />
+                                              <Text style={[styles.infoBadgeText, { color: '#ea580c' }]}>
+                                                {suggestion.route}
+                                              </Text>
+                                            </View>
+                                          )}
+                                        </View>
+
+                                        <View style={styles.suggestionMeta}>
+                                          {suggestion.confidence !== undefined && (
+                                            <View style={styles.confidenceBadge}>
+                                              <Ionicons 
+                                                name="checkmark-circle" 
+                                                size={12} 
+                                                color={suggestion.confidence >= 0.8 ? COLORS.success : suggestion.confidence >= 0.6 ? COLORS.warning : COLORS.error} 
+                                              />
+                                              <Text style={[
+                                                styles.confidenceText,
+                                                { color: suggestion.confidence >= 0.8 ? COLORS.success : suggestion.confidence >= 0.6 ? COLORS.warning : COLORS.error }
+                                              ]}>
+                                                {(suggestion.confidence * 100).toFixed(0)}% khớp
+                                              </Text>
+                                            </View>
+                                          )}
+                                          {(suggestion.matchExplanation || suggestion.matchReason) && (
+                                            <Text style={styles.matchReason}>
+                                              {suggestion.matchExplanation || (
+                                                suggestion.matchReason === 'same_name_same_dosage' ? 'Cùng tên, cùng liều' :
+                                                suggestion.matchReason === 'same_name_different_dosage' ? 'Cùng tên, khác liều' :
+                                                suggestion.matchReason === 'similar_name' ? 'Tên tương tự' :
+                                                suggestion.matchReason === 'partial_name_match' ? 'Tên gần giống' :
+                                                suggestion.matchReason === 'keyword_match' ? 'Khớp từ khóa' :
+                                                suggestion.matchReason === 'popular_medicine' ? 'Thuốc phổ biến' :
+                                                suggestion.matchReason === 'general_suggestion' ? 'Đề xuất chung' :
+                                                'Đề xuất'
+                                              )}
+                                            </Text>
+                                          )}
+                                        </View>
+                                      </View>
+                                      <View style={styles.suggestionActions}>
+                                        {isSelected ? (
+                                          <View style={styles.quantitySelector}>
+                                            <TouchableOpacity
+                                              style={styles.quantityButton}
+                                              onPress={() => {
+                                                if (selectedItem && selectedItem.quantity > 1) {
+                                                  setSelectedItems(selectedItems.map(item =>
+                                                    item.productId === suggestion.productId
+                                                      ? { ...item, quantity: item.quantity - 1 }
+                                                      : item
+                                                  ));
+                                                } else {
+                                                  setSelectedItems(selectedItems.filter(
+                                                    item => item.productId !== suggestion.productId
+                                                  ));
+                                                }
+                                              }}
+                                            >
+                                              <Ionicons name="remove" size={16} color={COLORS.text} />
+                                            </TouchableOpacity>
+                                            <Text style={styles.quantityText}>
+                                              {selectedItem?.quantity || 0}
+                                            </Text>
+                                            <TouchableOpacity
+                                              style={styles.quantityButton}
+                                              onPress={() => {
+                                                setSelectedItems(selectedItems.map(item =>
+                                                  item.productId === suggestion.productId
+                                                    ? { ...item, quantity: item.quantity + 1 }
+                                                    : item
+                                                ));
+                                              }}
+                                            >
+                                              <Ionicons name="add" size={16} color={COLORS.text} />
+                                            </TouchableOpacity>
+                                          </View>
+                                        ) : (
+                                          <TouchableOpacity
+                                            style={styles.addSuggestionButton}
+                                            onPress={() => {
+                                              setSelectedItems([...selectedItems, {
+                                                productId: suggestion.productId,
+                                                quantity: 1,
+                                              }]);
+                                            }}
+                                          >
+                                            <Ionicons name="add" size={16} color={COLORS.primary} />
+                                            <Text style={styles.addSuggestionText}>Thêm</Text>
+                                          </TouchableOpacity>
+                                        )}
+                                      </View>
+                                    </View>
+                                  );
+                                })}
+                              </View>
+                            </>
+                          ) : (
+                            <Text style={styles.noSuggestionsText}>
+                              Không tìm thấy thuốc khớp chính xác. Vui lòng liên hệ dược sĩ để được tư vấn.
+                            </Text>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                )}
 
               </>
             )}
@@ -1387,7 +1601,7 @@ export default function ConsultationScreen() {
               disabled={selectedItems.length === 0}
             />
           </View>
-        </View>
+        </SafeAreaView>
       </Modal>
 
       {/* Order Form Modal */}
@@ -1401,7 +1615,8 @@ export default function ConsultationScreen() {
           // setSnapshotItems([]);
         }}
       >
-        <View style={styles.modalContainer}>
+        <SafeAreaView style={styles.modalContainer} edges={['top']}>
+          <StatusBar barStyle="dark-content" backgroundColor="#fff" />
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Tạo đơn hàng</Text>
             <TouchableOpacity onPress={() => setShowOrderModal(false)}>
@@ -1512,7 +1727,7 @@ export default function ConsultationScreen() {
               loading={isProcessing}
             />
           </View>
-        </View>
+        </SafeAreaView>
       </Modal>
 
       {/* Quick Address Picker Modal */}
@@ -1522,7 +1737,8 @@ export default function ConsultationScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setShowAddressPicker(false)}
       >
-        <View style={styles.modalContainer}>
+        <SafeAreaView style={styles.modalContainer} edges={['top']}>
+          <StatusBar barStyle="dark-content" backgroundColor="#fff" />
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Chọn địa chỉ</Text>
             <TouchableOpacity onPress={() => setShowAddressPicker(false)}>
@@ -1595,7 +1811,7 @@ export default function ConsultationScreen() {
               style={styles.modalButton}
             />
           </View>
-        </View>
+        </SafeAreaView>
       </Modal>
     </ScrollView>
   );
@@ -1728,6 +1944,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: 16,
+    paddingTop: Platform.OS === 'android' ? 16 : 16, // SafeAreaView handles iOS, but ensure Android has proper spacing
     backgroundColor: '#fff',
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
@@ -1972,6 +2189,150 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: COLORS.textSecondary,
     marginBottom: 8,
+  },
+  suggestionSectionCard: {
+    borderWidth: 1,
+    borderColor: COLORS.warning + '40',
+    backgroundColor: COLORS.warning + '10',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
+  },
+  suggestionSectionHeader: {
+    marginBottom: 12,
+  },
+  suggestionSectionTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 4,
+  },
+  suggestionSectionTitleHighlight: {
+    color: COLORS.warning,
+  },
+  suggestionSectionDosage: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
+  },
+  suggestionTextContainer: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: COLORS.warning + '50',
+  },
+  suggestionText: {
+    fontSize: 13,
+    color: COLORS.text,
+    lineHeight: 20,
+  },
+  addAllButtonContainer: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginBottom: 12,
+  },
+  addAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.success,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    gap: 6,
+  },
+  addAllButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  suggestionsList: {
+    gap: 12,
+  },
+  noSuggestionsText: {
+    fontSize: 13,
+    color: COLORS.textSecondary,
+    fontStyle: 'italic',
+    marginTop: 8,
+  },
+  suggestionDosage: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 4,
+  },
+  suggestionIndication: {
+    fontSize: 12,
+    color: COLORS.text,
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  suggestionDetails: {
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  suggestionDetailText: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 4,
+    lineHeight: 18,
+  },
+  suggestionDetailLabel: {
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  contraindicationBox: {
+    backgroundColor: '#fee2e2',
+    borderWidth: 1,
+    borderColor: COLORS.error + '40',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 12,
+    marginBottom: 8,
+  },
+  contraindicationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  contraindicationTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.error,
+  },
+  contraindicationText: {
+    fontSize: 12,
+    color: COLORS.error,
+    lineHeight: 18,
+  },
+  suggestionDescription: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 8,
+    lineHeight: 18,
+    fontStyle: 'italic',
+  },
+  suggestionBadges: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  infoBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#dbeafe',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  infoBadgeText: {
+    fontSize: 11,
+    color: COLORS.primary,
+    fontWeight: '500',
   },
   suggestionCard: {
     flexDirection: 'row',

@@ -2,14 +2,29 @@ import Tesseract from 'tesseract.js';
 import fs from 'fs';
 import path from 'path';
 
+export interface MedicationInfo {
+  name: string; // Tên thuốc
+  dosage?: string; // Liều lượng (ví dụ: "200mg", "500mg")
+  quantity?: string; // Số lượng (ví dụ: "10 viên", "20 viên", "02 tuýp")
+  unit?: string; // Đơn vị (ví dụ: "viên", "tuýp", "chai")
+  instructions?: string; // Cách dùng (ví dụ: "Uống: SÁNG 1 Viên", "Dùng ngoài")
+  frequency?: string; // Tần suất (ví dụ: "Sáng 1 viên, Chiều 1 viên")
+}
+
 export interface ExtractedPrescriptionInfo {
   customerName?: string;
   phoneNumber?: string;
   doctorName?: string;
   hospitalName?: string;
   examinationDate?: string;
+  dateOfBirth?: string; // Ngày tháng năm sinh
+  yearOfBirth?: string; // Năm sinh (chỉ năm)
+  age?: string; // Tuổi
   diagnosis?: string;
   notes?: string;
+  medications?: MedicationInfo[]; // Danh sách thuốc
+  insuranceNumber?: string; // Mã số bảo hiểm y tế
+  address?: string; // Địa chỉ
   rawText: string;
 }
 
@@ -664,6 +679,83 @@ export function extractPrescriptionInfo(ocrText: string): ExtractedPrescriptionI
   return result;
 }
 
+// Track Gemini quota status to avoid multiple failed calls
+let geminiQuotaExceeded = false;
+let geminiQuotaResetTime: number | null = null;
+let lastGeminiApiKey: string | null = null; // Track API key to detect changes
+
+/**
+ * Check if Gemini quota is exceeded
+ */
+function isGeminiQuotaExceeded(): boolean {
+  // Check if API key has changed - if so, reset quota status
+  const currentApiKey = process.env.GEMINI_API_KEY;
+  
+  if (currentApiKey && currentApiKey !== lastGeminiApiKey) {
+    // API key changed - reset quota status
+    const wasExceeded = geminiQuotaExceeded;
+    geminiQuotaExceeded = false;
+    geminiQuotaResetTime = null;
+    lastGeminiApiKey = currentApiKey;
+    console.log(`🔄 Gemini API key changed - resetting quota status (was exceeded: ${wasExceeded})`);
+    console.log(`   New API key: ${currentApiKey.substring(0, 10)}...${currentApiKey.substring(currentApiKey.length - 4)}`);
+    return false; // Allow using new API key
+  }
+  
+  // Update last API key if not set
+  if (currentApiKey && !lastGeminiApiKey) {
+    lastGeminiApiKey = currentApiKey;
+    console.log(`✅ Gemini API key initialized: ${currentApiKey.substring(0, 10)}...${currentApiKey.substring(currentApiKey.length - 4)}`);
+  }
+  
+  if (!geminiQuotaExceeded) {
+    return false; // Quota not exceeded
+  }
+  
+  // Reset flag after 1 hour (quota usually resets daily, but we check hourly)
+  if (geminiQuotaResetTime && Date.now() > geminiQuotaResetTime) {
+    geminiQuotaExceeded = false;
+    geminiQuotaResetTime = null;
+    console.log('🔄 Gemini quota check reset - will try again');
+    return false;
+  }
+  
+  // Still exceeded
+  const remainingTime = geminiQuotaResetTime ? Math.round((geminiQuotaResetTime - Date.now()) / 1000 / 60) : 0;
+  console.log(`⏸️ Gemini quota still exceeded (will retry in ${remainingTime} minutes)`);
+  return true;
+}
+
+/**
+ * Mark Gemini quota as exceeded
+ */
+function markGeminiQuotaExceeded() {
+  geminiQuotaExceeded = true;
+  // Reset after 1 hour
+  geminiQuotaResetTime = Date.now() + (60 * 60 * 1000);
+  // Store current API key when marking as exceeded
+  lastGeminiApiKey = process.env.GEMINI_API_KEY || null;
+  console.log('⚠️ Gemini quota exceeded - skipping Gemini calls for 1 hour');
+}
+
+/**
+ * Check if error is a quota/rate limit error
+ */
+function isQuotaError(error: any): boolean {
+  const errorMessage = error?.message || '';
+  const errorStatus = error?.status || error?.response?.status;
+  
+  return (
+    errorStatus === 429 ||
+    errorMessage.includes('429') ||
+    errorMessage.includes('quota') ||
+    errorMessage.includes('Quota exceeded') ||
+    errorMessage.includes('rate limit') ||
+    errorMessage.includes('Rate limit') ||
+    errorMessage.includes('Too Many Requests')
+  );
+}
+
 /**
  * Use Gemini AI to correct OCR text and extract structured information
  */
@@ -671,13 +763,18 @@ async function correctOCRWithGemini(ocrText: string): Promise<string | null> {
   try {
     // Check if Gemini is available
     if (!process.env.GEMINI_API_KEY) {
+      console.log('⚠️ Gemini API key not set');
       return null;
     }
 
-    const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    const model = genAI.getGenerativeModel({ model: modelName });
+    // Check quota status (this will auto-reset if API key changed)
+    if (isGeminiQuotaExceeded()) {
+      console.log('⏭️ Skipping Gemini OCR correction - quota exceeded');
+      return null;
+    }
+    
+    console.log('🔄 Attempting Gemini OCR correction...');
+    const { geminiGenerateContentText, buildGeminiCacheKey } = await import('./geminiRuntime.js');
 
     const prompt = `Bạn là chuyên gia xử lý văn bản tiếng Việt từ OCR. Nhiệm vụ của bạn là sửa lỗi OCR và trả về văn bản chính xác.
 
@@ -693,17 +790,17 @@ Yêu cầu:
 
 Trả về văn bản đã được sửa chữa:`;
 
-    // Add timeout (20 seconds) to avoid blocking - increased for production
-    const timeoutPromise = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), 20000);
+    const cacheKey = buildGeminiCacheKey('ocr-correct', {
+      text: ocrText,
+      promptVersion: 'v1',
     });
-    
-    const geminiPromise = model.generateContent(prompt).then(result => {
-      const response = result.response;
-      return response.text();
+    const correctedText = await geminiGenerateContentText({
+      parts: [{ text: prompt }],
+      cacheKey,
+      cacheTtlMs: 24 * 60 * 60 * 1000, // 24h
+      maxRetries: 3,
+      opName: 'correctOCRWithGemini',
     });
-    
-    const correctedText = await Promise.race([geminiPromise, timeoutPromise]);
 
     if (correctedText && correctedText.trim().length > 0) {
       console.log('✅ Gemini OCR correction completed');
@@ -712,7 +809,20 @@ Trả về văn bản đã được sửa chữa:`;
 
     return null;
   } catch (error: any) {
-    console.error('❌ Gemini OCR correction error:', error.message);
+    // Check if it's a quota error
+    if (isQuotaError(error)) {
+      const currentApiKey = process.env.GEMINI_API_KEY;
+      const apiKeyPreview = currentApiKey ? `${currentApiKey.substring(0, 10)}...${currentApiKey.substring(currentApiKey.length - 4)}` : 'N/A';
+      const errorDetails = error?.message || error?.toString() || 'Unknown error';
+      markGeminiQuotaExceeded();
+      console.error(`❌ Gemini OCR correction - Quota exceeded`);
+      console.error(`   API Key: ${apiKeyPreview}`);
+      console.error(`   Error: ${errorDetails.substring(0, 200)}`);
+      console.error('   ⚠️ If this is a NEW API key, it may also be out of quota (20 requests/day for free tier)');
+      console.error('   💡 Solution: Check quota at https://aistudio.google.com/apikey or wait for daily reset');
+    } else {
+      console.error('❌ Gemini OCR correction error:', error.message);
+    }
     return null;
   }
 }
@@ -724,13 +834,18 @@ async function extractInfoWithGemini(ocrText: string, imagePath?: string): Promi
   try {
     // Check if Gemini is available
     if (!process.env.GEMINI_API_KEY) {
+      console.log('⚠️ Gemini API key not set');
       return null;
     }
 
-    const { GoogleGenerativeAI } = await import('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    const model = genAI.getGenerativeModel({ model: modelName });
+    // Check quota status (this will auto-reset if API key changed)
+    if (isGeminiQuotaExceeded()) {
+      console.log('⏭️ Skipping Gemini extraction - quota exceeded');
+      return null;
+    }
+    
+    console.log('🔄 Attempting Gemini extraction...');
+    const { geminiGenerateContentText, buildGeminiCacheKey } = await import('./geminiRuntime.js');
 
     let prompt = '';
     let parts: any[] = [];
@@ -746,16 +861,57 @@ async function extractInfoWithGemini(ocrText: string, imagePath?: string): Promi
 Hãy trích xuất và trả về JSON với các trường sau (chỉ trả về JSON, không có text khác):
 {
   "customerName": "Tên đầy đủ của bệnh nhân (viết hoa, có dấu đầy đủ)",
+  "phoneNumber": "Số điện thoại (nếu có, ví dụ: 0365887517)",
   "doctorName": "Tên đầy đủ của bác sĩ (có dấu đầy đủ)",
   "hospitalName": "Tên đầy đủ của bệnh viện/phòng khám (viết hoa, có dấu đầy đủ)",
   "examinationDate": "Ngày khám (format: YYYY-MM-DD)",
-  "diagnosis": "Chẩn đoán đầy đủ (có dấu đầy đủ)"
+  "dateOfBirth": "Ngày sinh đầy đủ (format: YYYY-MM-DD, ví dụ: 1980-01-01)",
+  "yearOfBirth": "Năm sinh (chỉ năm, ví dụ: 1980)",
+  "diagnosis": "Chẩn đoán đầy đủ (có dấu đầy đủ, bao gồm tất cả ICD codes và mô tả)",
+  "insuranceNumber": "Mã số bảo hiểm y tế (nếu có, ví dụ: DN4828222085030)",
+  "address": "Địa chỉ thường trú/tạm trú (nếu có)",
+  "medications": [
+    {
+      "name": "Tên thuốc (có dấu đầy đủ, ví dụ: Celecoxib)",
+      "dosage": "Liều lượng (ví dụ: 200mg, 500mg, 1%/20g)",
+      "quantity": "Số lượng (ví dụ: 10 viên, 20 viên, 02 tuýp)",
+      "unit": "Đơn vị (ví dụ: viên, tuýp, chai)",
+      "instructions": "Cách dùng đầy đủ (ví dụ: Uống: SÁNG 1 Viên, Dùng ngoài: Lời dan)",
+      "frequency": "Tần suất (ví dụ: Sáng 1 viên, Chiều 1 viên)"
+    }
+  ]
 }
 
-Lưu ý:
-- Tên phải có dấu tiếng Việt đầy đủ và chính xác
-- Chẩn đoán phải đầy đủ, không bị cắt ngắn
-- Ngày tháng phải đúng format YYYY-MM-DD`;
+Lưu ý CỰC KỲ QUAN TRỌNG:
+1. Tên (customerName, doctorName, hospitalName):
+   - PHẢI lấy ĐẦY ĐỦ tên, KHÔNG được cắt ngắn
+   - customerName: Ví dụ "HUỲNH THỊ PHƯỢNG" - phải lấy cả 3 từ, không chỉ "HUỲNH"
+   - doctorName: Ví dụ "Nguyễn Thanh Danh" - phải lấy cả 3 từ, không chỉ "Nguyễn Thanh"
+   - hospitalName: Ví dụ "BV ĐKKV CAI LẬY" - phải lấy đầy đủ, không chỉ "BV ĐKKV CAI"
+   - Tất cả tên PHẢI có dấu tiếng Việt đầy đủ và chính xác
+
+2. Ngày sinh/Năm sinh:
+   - Tìm kiếm KỸ LƯỠNG phần "Ngày sinh:" hoặc "Năm sinh:" trong ảnh
+   - Ngày sinh có thể ở dạng: "01/01/1980", "01-01-1980", "01.01.1980", hoặc chỉ "1980"
+   - Nếu chỉ có năm sinh (ví dụ: "1980"), đặt dateOfBirth = "1980-01-01" và yearOfBirth = "1980"
+   - Nếu có đầy đủ ngày tháng năm (ví dụ: "01/01/1980"), đặt dateOfBirth = "1980-01-01" và yearOfBirth = "1980"
+   - PHẢI TÌM KỸ - ngày sinh có thể bị OCR miss nhưng vẫn có thể thấy trong ảnh
+
+3. Thuốc (medications):
+   - Tìm kiếm phần "Thuốc điều trị:" hoặc "Thuốc:" trong ảnh
+   - Mỗi thuốc thường có format: "1) Tên thuốc (tên gốc) Liều lượng SL: Số lượng Đơn vị Cách dùng: Hướng dẫn"
+   - Trích xuất TẤT CẢ thuốc trong đơn, không bỏ sót
+   - Tên thuốc: lấy cả tên thương mại và tên gốc nếu có (ví dụ: "Celecoxib (Celecoxib)")
+   - Liều lượng: lấy đầy đủ (ví dụ: "200mg", "500mg", "1%/20g")
+   - Số lượng: lấy cả số và đơn vị (ví dụ: "10 viên", "20 viên", "02 tuýp")
+   - Cách dùng: lấy đầy đủ hướng dẫn (ví dụ: "Uống: SÁNG 1 Viên", "Dùng ngoài: Lời dan")
+   - Tần suất: rút gọn từ cách dùng (ví dụ: "Sáng 1 viên, Chiều 1 viên")
+
+4. Thông tin khác:
+   - Tên phải có dấu tiếng Việt đầy đủ và chính xác
+   - Chẩn đoán phải đầy đủ, không bị cắt ngắn, bao gồm tất cả ICD codes trong ngoặc đơn
+   - Ngày tháng phải đúng format YYYY-MM-DD
+   - Nếu không tìm thấy thông tin nào, để null hoặc mảng rỗng []`;
 
       parts = [
         {
@@ -778,31 +934,83 @@ ${ocrText}
 Hãy trích xuất và trả về JSON với các trường sau (chỉ trả về JSON, không có text khác):
 {
   "customerName": "Tên đầy đủ của bệnh nhân (viết hoa, có dấu đầy đủ)",
+  "phoneNumber": "Số điện thoại (nếu có, ví dụ: 0365887517)",
   "doctorName": "Tên đầy đủ của bác sĩ (có dấu đầy đủ)",
   "hospitalName": "Tên đầy đủ của bệnh viện/phòng khám (viết hoa, có dấu đầy đủ)",
   "examinationDate": "Ngày khám (format: YYYY-MM-DD)",
-  "diagnosis": "Chẩn đoán đầy đủ (có dấu đầy đủ)"
+  "dateOfBirth": "Ngày sinh đầy đủ (format: YYYY-MM-DD, ví dụ: 1980-01-01)",
+  "yearOfBirth": "Năm sinh (chỉ năm, ví dụ: 1980)",
+  "diagnosis": "Chẩn đoán đầy đủ (có dấu đầy đủ, bao gồm tất cả ICD codes và mô tả)",
+  "insuranceNumber": "Mã số bảo hiểm y tế (nếu có, ví dụ: DN4828222085030)",
+  "address": "Địa chỉ thường trú/tạm trú (nếu có)",
+  "medications": [
+    {
+      "name": "Tên thuốc (có dấu đầy đủ, ví dụ: Celecoxib)",
+      "dosage": "Liều lượng (ví dụ: 200mg, 500mg, 1%/20g)",
+      "quantity": "Số lượng (ví dụ: 10 viên, 20 viên, 02 tuýp)",
+      "unit": "Đơn vị (ví dụ: viên, tuýp, chai)",
+      "instructions": "Cách dùng đầy đủ (ví dụ: Uống: SÁNG 1 Viên, Dùng ngoài: Lời dan)",
+      "frequency": "Tần suất (ví dụ: Sáng 1 viên, Chiều 1 viên)"
+    }
+  ]
 }
 
-Lưu ý:
-- Tên phải có dấu tiếng Việt đầy đủ và chính xác
-- Chẩn đoán phải đầy đủ, không bị cắt ngắn
-- Ngày tháng phải đúng format YYYY-MM-DD`;
+Lưu ý QUAN TRỌNG:
+1. Tên (customerName, doctorName, hospitalName):
+   - PHẢI lấy ĐẦY ĐỦ tên, KHÔNG được cắt ngắn
+   - customerName: Ví dụ "HUỲNH THỊ PHƯỢNG" - phải lấy cả 3 từ, không chỉ "HUỲNH"
+   - doctorName: Ví dụ "Nguyễn Thanh Danh" - phải lấy cả 3 từ, không chỉ "Nguyễn Thanh"
+   - hospitalName: Ví dụ "BV ĐKKV CAI LẬY" - phải lấy đầy đủ, không chỉ "BV ĐKKV CAI"
+   - Tất cả tên PHẢI có dấu tiếng Việt đầy đủ và chính xác
+
+2. Ngày sinh/Năm sinh:
+   - Tìm kiếm kỹ lưỡng phần "Ngày sinh:" hoặc "Năm sinh:" trong văn bản
+   - Ngày sinh có thể ở dạng: "01/01/1980", "01-01-1980", "01.01.1980", hoặc chỉ "1980"
+   - Nếu chỉ có năm sinh (ví dụ: "1980"), đặt dateOfBirth = "1980-01-01" và yearOfBirth = "1980"
+   - Nếu có đầy đủ ngày tháng năm (ví dụ: "01/01/1980"), đặt dateOfBirth = "1980-01-01" và yearOfBirth = "1980"
+
+3. Thuốc (medications):
+   - Tìm kiếm phần "Thuốc điều trị:" hoặc "Thuốc:" trong văn bản OCR
+   - Mỗi thuốc thường có format: "1) Tên thuốc (tên gốc) Liều lượng SL: Số lượng Đơn vị Cách dùng: Hướng dẫn"
+   - Trích xuất TẤT CẢ thuốc trong đơn, không bỏ sót
+   - Tên thuốc: lấy cả tên thương mại và tên gốc nếu có (ví dụ: "Celecoxib (Celecoxib)")
+   - Liều lượng: lấy đầy đủ (ví dụ: "200mg", "500mg", "1%/20g")
+   - Số lượng: lấy cả số và đơn vị (ví dụ: "10 viên", "20 viên", "02 tuýp")
+   - Cách dùng: lấy đầy đủ hướng dẫn (ví dụ: "Uống: SÁNG 1 Viên", "Dùng ngoài: Lời dan")
+   - Tần suất: rút gọn từ cách dùng (ví dụ: "Sáng 1 viên, Chiều 1 viên")
+
+4. Thông tin khác:
+   - Tên phải có dấu tiếng Việt đầy đủ và chính xác
+   - Chẩn đoán phải đầy đủ, không bị cắt ngắn, bao gồm tất cả ICD codes trong ngoặc đơn
+   - Ngày tháng phải đúng format YYYY-MM-DD
+   - Nếu không tìm thấy thông tin nào, để null hoặc mảng rỗng []`;
 
       parts = [{ text: prompt }];
     }
 
-    // Add timeout (20 seconds) to avoid blocking - increased for production
-    const timeoutPromise = new Promise<null>((resolve) => {
-      setTimeout(() => resolve(null), 20000);
+    const cacheKey = (() => {
+      // Prefer caching by image file fingerprint when available; fallback to OCR text hash.
+      try {
+        if (imagePath && fs.existsSync(imagePath)) {
+          const stat = fs.statSync(imagePath);
+          return buildGeminiCacheKey('ocr-extract-vision', {
+            imagePath: path.basename(imagePath),
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            promptVersion: 'v1',
+          });
+        }
+      } catch {}
+      return buildGeminiCacheKey('ocr-extract-text', { text: ocrText, promptVersion: 'v1' });
+    })();
+
+    const responseText = await geminiGenerateContentText({
+      parts,
+      cacheKey,
+      cacheTtlMs: 24 * 60 * 60 * 1000, // 24h
+      maxRetries: 3,
+      opName: 'extractInfoWithGemini',
     });
-    
-    const geminiPromise = model.generateContent(parts).then(result => {
-      const response = result.response;
-      return response.text();
-    });
-    
-    const responseText = await Promise.race([geminiPromise, timeoutPromise]);
     
     if (!responseText) {
       console.warn('⚠️ Gemini extraction timeout or failed');
@@ -822,7 +1030,20 @@ Lưu ý:
 
     return null;
   } catch (error: any) {
-    console.error('❌ Gemini extraction error:', error.message);
+    // Check if it's a quota error
+    if (isQuotaError(error)) {
+      const currentApiKey = process.env.GEMINI_API_KEY;
+      const apiKeyPreview = currentApiKey ? `${currentApiKey.substring(0, 10)}...${currentApiKey.substring(currentApiKey.length - 4)}` : 'N/A';
+      const errorDetails = error?.message || error?.toString() || 'Unknown error';
+      markGeminiQuotaExceeded();
+      console.error(`❌ Gemini extraction - Quota exceeded`);
+      console.error(`   API Key: ${apiKeyPreview}`);
+      console.error(`   Error: ${errorDetails.substring(0, 200)}`);
+      console.error('   ⚠️ If this is a NEW API key, it may also be out of quota (20 requests/day for free tier)');
+      console.error('   💡 Solution: Check quota at https://aistudio.google.com/apikey or wait for daily reset');
+    } else {
+      console.error('❌ Gemini extraction error:', error.message);
+    }
     return null;
   }
 }
@@ -876,20 +1097,55 @@ export async function processPrescriptionImage(imagePathOrBase64: string): Promi
       // Extract info using pattern matching
       const extractedInfo = extractPrescriptionInfo(ocrText);
       
-      // Merge Gemini results (prioritize Gemini if available and more complete)
+      // Merge Gemini results (PRIORITIZE Gemini AI - it's more accurate)
       if (geminiInfo) {
-        if (geminiInfo.customerName && geminiInfo.customerName.length > (extractedInfo.customerName?.length || 0)) {
-          extractedInfo.customerName = geminiInfo.customerName;
+        console.log('🔄 Merging Gemini AI results with pattern matching results...');
+        // QUAN TRỌNG: Ưu tiên Gemini AI vì nó chính xác hơn, đặc biệt với tiếng Việt có dấu
+        // Chỉ dùng pattern matching làm fallback nếu Gemini không có giá trị
+        if (geminiInfo.customerName && geminiInfo.customerName.trim().length > 0) {
+          extractedInfo.customerName = geminiInfo.customerName.trim();
           console.log('✅ Using Gemini-extracted customer name:', extractedInfo.customerName);
+        } else if (extractedInfo.customerName) {
+          console.log('ℹ️ Using pattern-matching customer name (Gemini did not provide):', extractedInfo.customerName);
         }
-        if (geminiInfo.doctorName && geminiInfo.doctorName.length > (extractedInfo.doctorName?.length || 0)) {
-          extractedInfo.doctorName = geminiInfo.doctorName;
+        
+        if (geminiInfo.doctorName && geminiInfo.doctorName.trim().length > 0) {
+          extractedInfo.doctorName = geminiInfo.doctorName.trim();
           console.log('✅ Using Gemini-extracted doctor name:', extractedInfo.doctorName);
+        } else if (extractedInfo.doctorName) {
+          console.log('ℹ️ Using pattern-matching doctor name (Gemini did not provide):', extractedInfo.doctorName);
         }
-        if (geminiInfo.hospitalName && geminiInfo.hospitalName.length > (extractedInfo.hospitalName?.length || 0)) {
-          extractedInfo.hospitalName = geminiInfo.hospitalName;
+        
+        if (geminiInfo.hospitalName && geminiInfo.hospitalName.trim().length > 0) {
+          extractedInfo.hospitalName = geminiInfo.hospitalName.trim();
           console.log('✅ Using Gemini-extracted hospital name:', extractedInfo.hospitalName);
+        } else if (extractedInfo.hospitalName) {
+          console.log('ℹ️ Using pattern-matching hospital name (Gemini did not provide):', extractedInfo.hospitalName);
         }
+        
+        // Merge additional personal info (Gemini is more accurate for these)
+        if (geminiInfo.phoneNumber) {
+          extractedInfo.phoneNumber = geminiInfo.phoneNumber;
+          console.log('✅ Using Gemini-extracted phone number:', extractedInfo.phoneNumber);
+        }
+        if (geminiInfo.insuranceNumber) {
+          extractedInfo.insuranceNumber = geminiInfo.insuranceNumber;
+          console.log('✅ Using Gemini-extracted insurance number:', extractedInfo.insuranceNumber);
+        }
+        if (geminiInfo.address) {
+          extractedInfo.address = geminiInfo.address;
+          console.log('✅ Using Gemini-extracted address:', extractedInfo.address);
+        }
+        
+        // Merge medications (Gemini is much better at extracting structured medication data)
+        if (geminiInfo.medications && Array.isArray(geminiInfo.medications) && geminiInfo.medications.length > 0) {
+          extractedInfo.medications = geminiInfo.medications;
+          console.log(`✅ Using Gemini-extracted medications (${geminiInfo.medications.length} medications)`);
+          geminiInfo.medications.forEach((med: MedicationInfo, index: number) => {
+            console.log(`   ${index + 1}. ${med.name}${med.dosage ? ` - ${med.dosage}` : ''}${med.quantity ? ` (${med.quantity})` : ''}`);
+          });
+        }
+        
         if (geminiInfo.diagnosis && geminiInfo.diagnosis.length > (extractedInfo.diagnosis?.length || 0)) {
           extractedInfo.diagnosis = geminiInfo.diagnosis;
           console.log('✅ Using Gemini-extracted diagnosis:', extractedInfo.diagnosis);
@@ -897,6 +1153,14 @@ export async function processPrescriptionImage(imagePathOrBase64: string): Promi
         if (geminiInfo.examinationDate) {
           extractedInfo.examinationDate = geminiInfo.examinationDate;
           console.log('✅ Using Gemini-extracted examination date:', extractedInfo.examinationDate);
+        }
+        if (geminiInfo.dateOfBirth) {
+          extractedInfo.dateOfBirth = geminiInfo.dateOfBirth;
+          console.log('✅ Using Gemini-extracted date of birth:', extractedInfo.dateOfBirth);
+        }
+        if (geminiInfo.yearOfBirth) {
+          extractedInfo.yearOfBirth = geminiInfo.yearOfBirth;
+          console.log('✅ Using Gemini-extracted year of birth:', extractedInfo.yearOfBirth);
         }
       }
       
@@ -921,23 +1185,59 @@ export async function processPrescriptionImage(imagePathOrBase64: string): Promi
   // Try to extract structured info with Gemini (pass imagePath for Vision API)
   const geminiInfo = await extractInfoWithGemini(ocrText, imagePath);
   
-  // Extract info using pattern matching
+  // Extract info using pattern matching (always works, even without Gemini)
   const extractedInfo = extractPrescriptionInfo(ocrText);
+  console.log('✅ Extracted prescription info using pattern matching');
   
-  // Merge Gemini results (prioritize Gemini if available and more complete)
+  // Merge Gemini results (PRIORITIZE Gemini AI - it's more accurate)
   if (geminiInfo) {
-    if (geminiInfo.customerName && geminiInfo.customerName.length > (extractedInfo.customerName?.length || 0)) {
-      extractedInfo.customerName = geminiInfo.customerName;
+    console.log('🔄 Merging Gemini AI results with pattern matching results...');
+    // QUAN TRỌNG: Ưu tiên Gemini AI vì nó chính xác hơn, đặc biệt với tiếng Việt có dấu
+    // Chỉ dùng pattern matching làm fallback nếu Gemini không có giá trị
+    if (geminiInfo.customerName && geminiInfo.customerName.trim().length > 0) {
+      extractedInfo.customerName = geminiInfo.customerName.trim();
       console.log('✅ Using Gemini-extracted customer name:', extractedInfo.customerName);
+    } else if (extractedInfo.customerName) {
+      console.log('ℹ️ Using pattern-matching customer name (Gemini did not provide):', extractedInfo.customerName);
     }
-    if (geminiInfo.doctorName && geminiInfo.doctorName.length > (extractedInfo.doctorName?.length || 0)) {
-      extractedInfo.doctorName = geminiInfo.doctorName;
+    
+    if (geminiInfo.doctorName && geminiInfo.doctorName.trim().length > 0) {
+      extractedInfo.doctorName = geminiInfo.doctorName.trim();
       console.log('✅ Using Gemini-extracted doctor name:', extractedInfo.doctorName);
+    } else if (extractedInfo.doctorName) {
+      console.log('ℹ️ Using pattern-matching doctor name (Gemini did not provide):', extractedInfo.doctorName);
     }
-    if (geminiInfo.hospitalName && geminiInfo.hospitalName.length > (extractedInfo.hospitalName?.length || 0)) {
-      extractedInfo.hospitalName = geminiInfo.hospitalName;
+    
+    if (geminiInfo.hospitalName && geminiInfo.hospitalName.trim().length > 0) {
+      extractedInfo.hospitalName = geminiInfo.hospitalName.trim();
       console.log('✅ Using Gemini-extracted hospital name:', extractedInfo.hospitalName);
+    } else if (extractedInfo.hospitalName) {
+      console.log('ℹ️ Using pattern-matching hospital name (Gemini did not provide):', extractedInfo.hospitalName);
     }
+    
+    // Merge additional personal info (Gemini is more accurate for these)
+    if (geminiInfo.phoneNumber) {
+      extractedInfo.phoneNumber = geminiInfo.phoneNumber;
+      console.log('✅ Using Gemini-extracted phone number:', extractedInfo.phoneNumber);
+    }
+    if (geminiInfo.insuranceNumber) {
+      extractedInfo.insuranceNumber = geminiInfo.insuranceNumber;
+      console.log('✅ Using Gemini-extracted insurance number:', extractedInfo.insuranceNumber);
+    }
+    if (geminiInfo.address) {
+      extractedInfo.address = geminiInfo.address;
+      console.log('✅ Using Gemini-extracted address:', extractedInfo.address);
+    }
+    
+    // Merge medications (Gemini is much better at extracting structured medication data)
+    if (geminiInfo.medications && Array.isArray(geminiInfo.medications) && geminiInfo.medications.length > 0) {
+      extractedInfo.medications = geminiInfo.medications;
+      console.log(`✅ Using Gemini-extracted medications (${geminiInfo.medications.length} medications)`);
+      geminiInfo.medications.forEach((med: MedicationInfo, index: number) => {
+        console.log(`   ${index + 1}. ${med.name}${med.dosage ? ` - ${med.dosage}` : ''}${med.quantity ? ` (${med.quantity})` : ''}`);
+      });
+    }
+    
     if (geminiInfo.diagnosis && geminiInfo.diagnosis.length > (extractedInfo.diagnosis?.length || 0)) {
       extractedInfo.diagnosis = geminiInfo.diagnosis;
       console.log('✅ Using Gemini-extracted diagnosis:', extractedInfo.diagnosis);
@@ -945,6 +1245,14 @@ export async function processPrescriptionImage(imagePathOrBase64: string): Promi
     if (geminiInfo.examinationDate) {
       extractedInfo.examinationDate = geminiInfo.examinationDate;
       console.log('✅ Using Gemini-extracted examination date:', extractedInfo.examinationDate);
+    }
+    if (geminiInfo.dateOfBirth) {
+      extractedInfo.dateOfBirth = geminiInfo.dateOfBirth;
+      console.log('✅ Using Gemini-extracted date of birth:', extractedInfo.dateOfBirth);
+    }
+    if (geminiInfo.yearOfBirth) {
+      extractedInfo.yearOfBirth = geminiInfo.yearOfBirth;
+      console.log('✅ Using Gemini-extracted year of birth:', extractedInfo.yearOfBirth);
     }
   }
   

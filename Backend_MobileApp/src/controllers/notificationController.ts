@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { Notification } from '../models/schema';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { socketService } from '../services/socketService.js';
+import { publishRealtimeEvent } from '../services/supabaseService.js';
 
 export class NotificationController {
   // Get user's notifications
@@ -159,11 +160,21 @@ export class NotificationController {
         isRead: false,
       });
 
-      // Emit real-time event for new notification
+      // Emit real-time event for new notification via Socket.IO
       socketService.emitToUser(userId, 'notification:new', {
         notification: notification.toObject(),
         message: title,
       });
+
+      // Publish to Supabase real-time (if configured)
+      await publishRealtimeEvent(
+        `user:${userId}`,
+        'notification:new',
+        {
+          notification: notification.toObject(),
+          message: title,
+        }
+      );
 
       return notification;
     } catch (error: any) {

@@ -34,6 +34,21 @@ const initialAssistantMessage: Message = {
   timestamp: Date.now(),
 };
 
+/**
+ * Loại bỏ các dấu markdown (*, **, _, __) khỏi nội dung tin nhắn
+ */
+function removeMarkdownFormatting(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  
+  // Loại bỏ các dấu markdown phổ biến
+  return text
+    .replace(/\*\*/g, '') // Loại bỏ ** (bold)
+    .replace(/\*/g, '') // Loại bỏ * (italic hoặc bold)
+    .replace(/__/g, '') // Loại bỏ __ (bold)
+    .replace(/_/g, '') // Loại bỏ _ (italic)
+    .trim();
+}
+
 export function AIFloatingChat() {
   const insets = useSafeAreaInsets();
   const [isOpen, setIsOpen] = useState(false);
@@ -137,7 +152,7 @@ export function AIFloatingChat() {
           <Image source={{ uri: item.imagePreview }} style={styles.preview} resizeMode="cover" />
         )}
         <Text style={item.role === 'user' ? styles.textUser : styles.textAssistant}>
-          {item.content}
+          {item.role === 'assistant' ? removeMarkdownFormatting(item.content) : item.content}
         </Text>
         <Text style={styles.timestamp}>
           {new Date(item.timestamp).toLocaleTimeString('vi-VN', {
@@ -165,7 +180,7 @@ export function AIFloatingChat() {
       <Modal visible={isOpen} transparent animationType="slide" onRequestClose={() => setIsOpen(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
+            <View style={[styles.modalHeader, { paddingTop: Math.max(insets.top, 16) }]}>
               <View>
                 <Text style={styles.modalTitle}>Trợ lý AI</Text>
                 <Text style={styles.modalSubtitle}>Chat và phân tích đơn thuốc</Text>
@@ -258,8 +273,7 @@ const styles = StyleSheet.create({
   },
   modalContent: {
     backgroundColor: '#fff',
-    height: '60%', // mở chiếm khoảng nửa màn hình
-    maxHeight: '85%',
+    height: '100%', // Chiếm toàn màn hình
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     overflow: 'hidden',

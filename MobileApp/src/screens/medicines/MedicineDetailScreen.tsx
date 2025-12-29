@@ -188,7 +188,16 @@ export default function MedicineDetailScreen({ route, navigation }: any) {
               transition={200}
               onLoadStart={() => setImageLoading(true)}
               onLoadEnd={() => setImageLoading(false)}
-              onError={() => {
+              onError={(error: any) => {
+                // Check if error is a 400 or 404 (common for missing images)
+                const errorMessage = error?.message || String(error || '');
+                const is400Error = errorMessage.includes('400') || errorMessage.includes('status code: 400');
+                const is404Error = errorMessage.includes('404') || errorMessage.includes('Not Found') || errorMessage.includes('status code: 404');
+                
+                // Only log non-404/400 errors (these are expected for missing images)
+                // Note: MedicineDetailScreen doesn't have logger imported, so we skip logging
+                
+                // Try fallback chain: primary -> fallback -> local placeholder
                 if (!imageError && primaryImageUrl) {
                   setImageError(true);
                 } else if (!fallbackError) {

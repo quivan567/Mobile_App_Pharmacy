@@ -544,38 +544,884 @@ function normalizeText(text: string): string {
   return normalized;
 }
 
-// Check for safety warnings
+// Check for safety warnings and handle difficult situations
 function checkSafetyWarnings(message: string): string | null {
   const lowerMessage = normalizeText(message);
+
+  // Critical symptoms - require immediate medical attention
+  const criticalPatterns: { pattern: RegExp; warning: string }[] = [
+    { pattern: /sốt\s*(cao|trên|>)\s*39/i, warning: safetyWarnings['sốt cao 40'] },
+    { pattern: /(khó thở|thở dốc|ngạt thở|thở gấp)/i, warning: safetyWarnings['đau ngực tim'] },
+    { pattern: /đau\s*ngực/i, warning: safetyWarnings['đau ngực'] },
+    { pattern: /trẻ\s*(em|nhỏ|<|dưới)\s*[0-5]\s*(tháng|th)/i, warning: '⚠️ Trẻ dưới 6 tháng cần được khám bác sĩ ngay. Không tự ý dùng thuốc.' },
+    { pattern: /mang\s*thai\s*(3|ba)\s*tháng\s*đầu/i, warning: '⚠️ Phụ nữ mang thai 3 tháng đầu cần khám bác sĩ trước khi dùng thuốc.' },
+    { pattern: /(nôn\s*ra\s*máu|đi\s*ngoài\s*ra\s*máu|ho\s*ra\s*máu|phân\s*có\s*máu)/i, warning: '⚠️ Đây là triệu chứng nghiêm trọng. Bạn cần đi khám bác sĩ ngay lập tức hoặc đến cơ sở y tế gần nhất. Không tự ý điều trị tại nhà.' },
+    { pattern: /(co giật|động kinh|hôn mê)/i, warning: '⚠️ Đây là tình trạng khẩn cấp. Bạn cần gọi cấp cứu 115 hoặc đến bệnh viện ngay lập tức.' },
+    { pattern: /tiêu\s*chảy\s*(?:hơn|trên|>|quá)\s*2\s*ngày/i, warning: '⚠️ Tiêu chảy kéo dài hơn 2 ngày là dấu hiệu nghiêm trọng, đặc biệt với trẻ em. Bạn cần đi khám bác sĩ ngay. Không tự ý điều trị tại nhà.' },
+    { pattern: /nôn\s*(?:nhiều|liên\s*tục|thường\s*xuyên)/i, warning: '⚠️ Nôn nhiều hoặc nôn liên tục là dấu hiệu nghiêm trọng, đặc biệt với trẻ em. Bạn cần đi khám bác sĩ ngay. Không tự ý điều trị tại nhà.' }
+  ];
+
+  for (const { pattern, warning } of criticalPatterns) {
+    if (pattern.test(lowerMessage)) return warning;
+  }
+
+  // Check for prescription-only medicines requests
+  const prescriptionMedicinePatterns = [
+    /(kháng sinh|antibiotic|amoxicillin|azithromycin|cefuroxime|augmentin|metronidazole)/i,
+    /(thuốc\s*kê\s*đơn|thuốc\s*theo\s*đơn|thuốc\s*phải\s*có\s*đơn)/i,
+    /(corticoid|prednisolone|dexamethasone)/i
+  ];
   
+  for (const pattern of prescriptionMedicinePatterns) {
+    if (pattern.test(lowerMessage)) {
+      return '⚠️ Kháng sinh và một số thuốc khác là thuốc kê đơn, không được bán không cần đơn bác sĩ. Việc tự ý dùng thuốc kê đơn có thể gây nguy hiểm và kháng thuốc. Vui lòng đến bác sĩ để được kê đơn phù hợp.';
+    }
+  }
+
+  // Check for diagnosis requests (AI should not diagnose)
+  if (/(chẩn đoán|tôi\s*bị\s*bệnh\s*gì|bệnh\s*của\s*tôi\s*là|tôi\s*có\s*bị)/i.test(lowerMessage) && 
+      !/(thuốc|tư vấn|gợi ý)/i.test(lowerMessage)) {
+    return '⚠️ Tôi không thể chẩn đoán bệnh. Tôi chỉ có thể tư vấn về thuốc và triệu chứng nhẹ. Nếu bạn cần chẩn đoán, vui lòng đến bác sĩ để được khám và xét nghiệm.';
+  }
+
+  // Check existing safety warnings
   for (const [key, warning] of Object.entries(safetyWarnings)) {
     if (lowerMessage.includes(key)) {
       return warning;
+    }
+  }
+
+  return null;
+}
+
+// ============================================
+// PHÂN LOẠI INTENT VÀ EXTRACT TÊN SẢN PHẨM
+// ============================================
+
+/**
+ * Phân loại intent của câu hỏi người dùng
+ */
+function classifyQuestionIntent(userMessage: string): {
+  intent: 'medical_consultation' | 'stock_inquiry' | 'price_inquiry' | 'alternative_inquiry' | 'general';
+  extractedProductName?: string;
+} {
+  const lowerMessage = normalizeText(userMessage);
+  
+  // Keywords cho câu hỏi về tồn kho
+  const stockKeywords = [
+    'còn lại', 'còn bao nhiêu', 'còn không', 'còn hàng', 'tồn kho', 
+    'số lượng', 'có sẵn', 'còn không', 'còn lại bao nhiêu',
+    'còn bao nhiêu chai', 'còn bao nhiêu viên', 'còn bao nhiêu hộp'
+  ];
+  
+  // Keywords cho câu hỏi về giá
+  const priceKeywords = [
+    'giá', 'giá bao nhiêu', 'giá tiền', 'bao nhiêu tiền', 
+    'giá bán', 'chi phí', 'phí', 'cost'
+  ];
+  
+  // Keywords cho câu hỏi về thuốc thay thế
+  const alternativeKeywords = [
+    'thay thế', 'thay thế cho', 'thay cho', 'tương đương',
+    'giống', 'tương tự', 'thay vì', 'thay được không',
+    'có thuốc nào thay', 'thuốc nào thay', 'sản phẩm thay thế'
+  ];
+  
+  // Keywords cho tư vấn y tế
+  const medicalKeywords = [
+    'tư vấn', 'tôi bị', 'bị', 'có thuốc', 'uống thuốc gì',
+    'triệu chứng', 'đau', 'sốt', 'ho', 'cảm', 'cúm'
+  ];
+  
+  // Kiểm tra câu hỏi về tồn kho
+  const hasStockKeyword = stockKeywords.some(keyword => lowerMessage.includes(keyword));
+  if (hasStockKeyword) {
+    // Cố gắng extract tên sản phẩm
+    const productName = extractProductNameFromMessage(userMessage);
+    return { intent: 'stock_inquiry', extractedProductName: productName };
+  }
+  
+  // Kiểm tra câu hỏi về giá
+  const hasPriceKeyword = priceKeywords.some(keyword => lowerMessage.includes(keyword));
+  if (hasPriceKeyword) {
+    const productName = extractProductNameFromMessage(userMessage);
+    return { intent: 'price_inquiry', extractedProductName: productName };
+  }
+  
+  // Kiểm tra câu hỏi về thuốc thay thế
+  const hasAlternativeKeyword = alternativeKeywords.some(keyword => lowerMessage.includes(keyword));
+  if (hasAlternativeKeyword) {
+    const productName = extractProductNameFromMessage(userMessage);
+    return { intent: 'alternative_inquiry', extractedProductName: productName };
+  }
+  
+  // Kiểm tra tư vấn y tế
+  const hasMedicalKeyword = medicalKeywords.some(keyword => lowerMessage.includes(keyword));
+  if (hasMedicalKeyword) {
+    return { intent: 'medical_consultation' };
+  }
+  
+  // Mặc định là general
+  return { intent: 'general' };
+}
+
+/**
+ * Extract tên sản phẩm từ câu hỏi
+ * Cải thiện để xử lý các trường hợp như "ok biết rồi, muốn biết Siro Ích Nhi"
+ */
+function extractProductNameFromMessage(message: string): string | undefined {
+  // Danh sách các từ/cụm từ cần loại bỏ (mở rộng)
+  const removePatterns = [
+    // Từ chào hỏi, xác nhận
+    /^(ok|okay|được|biết rồi|hiểu rồi|tôi biết|tôi hiểu)[\s,]*/i,
+    /(ok|okay|được|biết rồi|hiểu rồi)[\s,]*/gi,
+    
+    // Từ hỏi
+    /cho tôi hỏi|hỏi|về|vậy|ạ|nhé|giúp|bạn|tôi|mình|thuốc/gi,
+    
+    // Từ về số lượng, giá
+    /còn lại|còn bao nhiêu|còn không|còn hàng|tồn kho|số lượng|giá|giá bao nhiêu|bao nhiêu/gi,
+    
+    // Từ về thay thế
+    /thay thế|thay cho|tương đương/gi,
+    
+    // Từ muốn, cần
+    /muốn biết|muốn hỏi|muốn|tôi muốn|cần biết|cần hỏi/gi,
+  ];
+  
+  let cleaned = message;
+  
+  // Loại bỏ các pattern
+  for (const pattern of removePatterns) {
+    cleaned = cleaned.replace(pattern, ' ');
+  }
+  
+  // Loại bỏ nhiều khoảng trắng
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  // Loại bỏ các ký tự đặc biệt ở đầu/cuối
+  cleaned = cleaned.replace(/^[?.,!\-:;,\s]+|[?.,!\-:;,\s]+$/g, '').trim();
+  
+  // Nếu còn lại ít hơn 100 ký tự và có ít nhất 2 ký tự, có thể là tên sản phẩm
+  if (cleaned.length >= 2 && cleaned.length < 100) {
+    // Kiểm tra xem có phải là tên sản phẩm hợp lệ không (có chữ cái)
+    if (/[a-zA-ZÀ-ỹ]/.test(cleaned)) {
+      return cleaned;
+    }
+  }
+  
+  // Nếu không extract được, thử các pattern khác
+  const patterns = [
+    // Pattern: "muốn biết [Tên sản phẩm]"
+    /(?:muốn biết|muốn hỏi|muốn|tôi muốn|cần biết|cần hỏi)[\s,]+([A-ZÀ-ỹ][^?.,!]+?)(?:\s+còn|\s+giá|\s+thay|$)/i,
+    
+    // Pattern: "tên sản phẩm [Tên]"
+    /(?:thuốc|sản phẩm)[\s,]+([A-ZÀ-ỹ][^?.,!]+?)(?:\s+còn|\s+giá|\s+thay|$)/i,
+    
+    // Pattern: tìm cụm từ có chữ cái viết hoa ở đầu (tên sản phẩm thường viết hoa chữ cái đầu)
+    /([A-ZÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ][A-Za-zÀ-ỹ\s]{2,50})/,
+    
+    // Pattern: tìm sau từ "biết" hoặc "hỏi"
+    /(?:biết|hỏi)[\s,]+([A-ZÀ-ỹ][^?.,!]+?)(?:\s+còn|\s+giá|\s+thay|$)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (match && match[1]) {
+      let extracted = match[1].trim();
+      // Loại bỏ các từ không cần thiết ở cuối
+      extracted = extracted.replace(/\s+(còn|giá|thay|vậy|ạ|nhé|gì|nào)$/i, '').trim();
+      
+      if (extracted.length >= 2 && extracted.length < 100 && /[a-zA-ZÀ-ỹ]/.test(extracted)) {
+        return extracted;
+      }
+    }
+  }
+  
+  // Thử tìm cụm từ có vẻ là tên sản phẩm (có chữ cái viết hoa)
+  const words = message.split(/\s+/);
+  const productNameWords: string[] = [];
+  
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    // Nếu từ bắt đầu bằng chữ cái viết hoa và không phải là từ khóa
+    if (/^[A-ZÀ-ỹ]/.test(word) && 
+        !/^(Tôi|Bạn|Mình|Cho|Hỏi|Về|Vậy|Còn|Bao|Nhiêu|Giá|Thay|Thế)$/i.test(word)) {
+      productNameWords.push(word);
+      // Tiếp tục lấy các từ sau nếu cũng viết hoa hoặc là từ thường (tên sản phẩm có thể có nhiều từ)
+      let j = i + 1;
+      while (j < words.length && 
+             (/^[A-ZÀ-ỹ]/.test(words[j]) || 
+              /^[a-zà-ỹ]/.test(words[j])) &&
+             !/^(còn|giá|thay|vậy|ạ|nhé|gì|nào|bao|nhiêu)$/i.test(words[j])) {
+        productNameWords.push(words[j]);
+        j++;
+      }
+      break;
+    }
+  }
+  
+  if (productNameWords.length >= 2) {
+    const extracted = productNameWords.join(' ').trim();
+    if (extracted.length >= 2 && extracted.length < 100) {
+      return extracted;
+    }
+  }
+  
+  return undefined;
+}
+
+// Extract medicine name from query
+function extractMedicineNameFromQuery(query: string): string | null {
+  // Keep original query for pattern matching (don't normalize yet)
+  const originalQuery = query;
+  const lowerQuery = normalizeText(query);
+  
+  // Pattern 1: Extract name before question words (còn bao nhiêu, còn hàng, giá bao nhiêu, etc.)
+  // Example: "Siro Ích Nhi còn bao nhiêu?" -> "Siro Ích Nhi"
+  const questionWords = ['còn bao nhiêu', 'còn hàng', 'còn không', 'giá bao nhiêu', 'giá', 'tồn kho', 
+                         'công dụng', 'liều dùng', 'chống chỉ định', 'của', 'thuốc', 'sản phẩm'];
+  for (const qWord of questionWords) {
+    const index = lowerQuery.indexOf(qWord);
+    if (index > 0) {
+      const beforeQuestion = originalQuery.substring(0, index).trim();
+      // Remove common prefixes
+      const cleaned = beforeQuestion
+        .replace(/^(thuốc|sản phẩm|cho|dành cho)\s+/i, '')
+        .trim();
+      if (cleaned.length > 2) {
+        return cleaned;
+      }
+    }
+  }
+  
+  // Pattern 2: Extract name after question words
+  // Example: "Giá của Siro Ích Nhi" -> "Siro Ích Nhi"
+  const patterns = [
+    /(?:thuốc|sản phẩm)\s+([A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+(?:\s+[A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+)*)/,
+    /(?:giá|tồn kho|còn hàng|công dụng|liều dùng|chống chỉ định)\s+(?:của|thuốc)?\s*([A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+(?:\s+[A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+)*)/,
+    /([A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+(?:\s+[A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+)*)\s+(?:còn|giá|tồn kho)/,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = originalQuery.match(pattern);
+    if (match && match[1]) {
+      const extracted = match[1].trim();
+      // Remove common suffixes/prefixes
+      const cleaned = extracted
+        .replace(/\s+(còn|giá|tồn kho|công dụng|liều dùng|chống chỉ định).*$/i, '')
+        .replace(/^(thuốc|sản phẩm|cho|dành cho)\s+/i, '')
+        .trim();
+      if (cleaned.length > 2) {
+        return cleaned;
+      }
+    }
+  }
+  
+  // Pattern 3: Extract capitalized words (medicine names usually start with capital)
+  // Example: "Siro Ích Nhi còn bao nhiêu?" -> "Siro Ích Nhi"
+  const capitalizedWords = originalQuery.match(/([A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+(?:\s+[A-ZÀ-Ỹ][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+)*)/);
+  if (capitalizedWords && capitalizedWords[0]) {
+    const extracted = capitalizedWords[0].trim();
+    // Skip if it's a common word or too short
+    const commonWords = ['Tôi', 'Bạn', 'Còn', 'Giá', 'Tồn', 'Kho', 'Hàng', 'Bao', 'Nhiêu'];
+    if (!commonWords.includes(extracted) && extracted.length > 3) {
+      return extracted;
     }
   }
   
   return null;
 }
 
-// Extract medicine name from query
-function extractMedicineNameFromQuery(query: string): string | null {
-  const lowerQuery = normalizeText(query);
-  
-  // Common patterns
-  const patterns = [
-    /(?:thuốc|sản phẩm)\s+([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+(?:\s+\d+[a-z]+)?)/i,
-    /([A-Z][a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+(?:\s+\d+[a-z]+)?)/,
-    /(?:giá|tồn kho|còn hàng|công dụng|liều dùng|chống chỉ định)\s+(?:của|thuốc)?\s*([a-zàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]+(?:\s+\d+[a-z]+)?)/i
-  ];
-  
-  for (const pattern of patterns) {
-    const match = query.match(pattern);
-    if (match && match[1]) {
-      return match[1].trim();
+// ============================================
+// QUERY DATABASE CHO CÁC LOẠI CÂU HỎI
+// ============================================
+
+/**
+ * Query database để lấy thông tin tồn kho của sản phẩm
+ * Sử dụng nhiều cách tìm kiếm để tăng độ chính xác
+ */
+async function queryProductStock(productName: string): Promise<any | null> {
+  try {
+    const db = mongoose.connection.db;
+    if (!db) return null;
+    
+    const productsCollection = db.collection('products');
+    const medicinesCollection = db.collection('medicines');
+    
+    // Chuẩn hóa tên sản phẩm để tìm kiếm
+    const normalizedName = productName.trim();
+    const nameWords = normalizedName.split(/\s+/).filter(w => w.length > 1);
+    
+    // Tạo nhiều pattern tìm kiếm
+    const searchPatterns: any[] = [
+      // Tìm chính xác
+      { name: { $regex: `^${normalizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } },
+      // Tìm chứa toàn bộ tên
+      { name: { $regex: normalizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+      // Tìm chứa brand
+      { brand: { $regex: normalizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+    ];
+    
+    // Nếu có nhiều từ, tìm các từ riêng lẻ
+    if (nameWords.length > 1) {
+      // Tìm sản phẩm chứa tất cả các từ
+      searchPatterns.push({
+        $and: nameWords.map(word => ({
+          $or: [
+            { name: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+            { brand: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+          ]
+        }))
+      });
+      
+      // Tìm sản phẩm chứa ít nhất 2 từ quan trọng (bỏ qua từ ngắn như "ho", "cho")
+      const importantWords = nameWords.filter(w => w.length > 2);
+      if (importantWords.length >= 2) {
+        searchPatterns.push({
+          $and: importantWords.slice(0, 2).map(word => ({
+            $or: [
+              { name: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+              { brand: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+            ]
+          }))
+        });
+      }
     }
+    
+    // Tìm trong products collection
+    let product = null;
+    for (const pattern of searchPatterns) {
+      product = await productsCollection.findOne({
+        $or: Array.isArray(pattern.$or) ? pattern.$or : [pattern]
+      });
+      if (product) break;
+    }
+    
+    // Nếu vẫn không tìm thấy, thử tìm với $and pattern
+    if (!product && nameWords.length > 1) {
+      product = await productsCollection.findOne({
+        $and: nameWords.map(word => ({
+          $or: [
+            { name: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+            { brand: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+          ]
+        }))
+      });
+    }
+    
+    if (product) {
+      return {
+        name: product.name,
+        stockQuantity: product.stockQuantity || 0,
+        unit: product.unit || 'sản phẩm',
+        price: product.price || 0,
+        inStock: product.inStock || false,
+        source: 'products'
+      };
+    }
+    
+    // Nếu không tìm thấy trong products, tìm trong medicines collection
+    let medicine = null;
+    for (const pattern of searchPatterns) {
+      medicine = await medicinesCollection.findOne({
+        $or: Array.isArray(pattern.$or) ? pattern.$or : [pattern]
+      });
+      if (medicine) break;
+    }
+    
+    // Nếu vẫn không tìm thấy, thử tìm với $and pattern
+    if (!medicine && nameWords.length > 1) {
+      medicine = await medicinesCollection.findOne({
+        $and: nameWords.map(word => ({
+          $or: [
+            { name: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+            { brand: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+          ]
+        }))
+      });
+    }
+    
+    if (medicine) {
+      return {
+        name: medicine.name,
+        stockQuantity: medicine.stockQuantity || 0,
+        unit: medicine.unit || 'sản phẩm',
+        price: medicine.price || 0,
+        inStock: (medicine.stockQuantity || 0) > 0,
+        source: 'medicines'
+      };
+    }
+    
+    // Log để debug
+    console.log(`[queryProductStock] Không tìm thấy sản phẩm với tên: "${productName}"`);
+    
+    // Thử tìm kiếm linh hoạt hơn: tìm sản phẩm có chứa tất cả các từ (không cần thứ tự)
+    if (nameWords.length >= 2) {
+      // Tạo query tìm sản phẩm có chứa tất cả các từ quan trọng
+      const allWordsPattern = {
+        $and: nameWords.map(word => ({
+          $or: [
+            { name: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+            { brand: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+          ]
+        }))
+      };
+      
+      // Tìm trong products
+      const flexibleProduct = await productsCollection.findOne(allWordsPattern);
+      if (flexibleProduct) {
+        console.log(`[queryProductStock] Tìm thấy sản phẩm linh hoạt: "${flexibleProduct.name}"`);
+        return {
+          name: flexibleProduct.name,
+          stockQuantity: flexibleProduct.stockQuantity || 0,
+          unit: flexibleProduct.unit || 'sản phẩm',
+          price: flexibleProduct.price || 0,
+          inStock: flexibleProduct.inStock || false,
+          source: 'products'
+        };
+      }
+      
+      // Tìm trong medicines
+      const flexibleMedicine = await medicinesCollection.findOne(allWordsPattern);
+      if (flexibleMedicine) {
+        console.log(`[queryProductStock] Tìm thấy thuốc linh hoạt: "${flexibleMedicine.name}"`);
+        return {
+          name: flexibleMedicine.name,
+          stockQuantity: flexibleMedicine.stockQuantity || 0,
+          unit: flexibleMedicine.unit || 'sản phẩm',
+          price: flexibleMedicine.price || 0,
+          inStock: (flexibleMedicine.stockQuantity || 0) > 0,
+          source: 'medicines'
+        };
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error querying product stock:', error);
+    return null;
+  }
+}
+
+/**
+ * Query database để lấy thông tin giá của sản phẩm
+ * Sử dụng logic tìm kiếm tương tự queryProductStock
+ */
+async function queryProductPrice(productName: string): Promise<any | null> {
+  try {
+    // Sử dụng lại logic từ queryProductStock
+    const stockInfo = await queryProductStock(productName);
+    if (!stockInfo) return null;
+    
+    const db = mongoose.connection.db;
+    if (!db) return null;
+    
+    const productsCollection = db.collection('products');
+    const medicinesCollection = db.collection('medicines');
+    
+    // Lấy thông tin đầy đủ về giá
+    const product = await productsCollection.findOne({ name: stockInfo.name });
+    if (product) {
+      return {
+        name: product.name,
+        price: product.price || 0,
+        originalPrice: product.originalPrice,
+        discountPercentage: product.discountPercentage || 0,
+        unit: product.unit || 'sản phẩm',
+        inStock: product.inStock || false,
+        source: 'products'
+      };
+    }
+    
+    const medicine = await medicinesCollection.findOne({ name: stockInfo.name });
+    if (medicine) {
+      return {
+        name: medicine.name,
+        price: medicine.price || 0,
+        unit: medicine.unit || 'sản phẩm',
+        inStock: (medicine.stockQuantity || 0) > 0,
+        source: 'medicines'
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error querying product price:', error);
+    return null;
+  }
+}
+
+/**
+ * Query database để tìm thuốc thay thế
+ * Tìm các thuốc có cùng hoạt chất, cùng chỉ định, hoặc cùng nhóm điều trị
+ */
+async function queryAlternativeMedicines(productName: string, limit: number = 5): Promise<any[]> {
+  try {
+    const db = mongoose.connection.db;
+    if (!db) return [];
+    
+    const productsCollection = db.collection('products');
+    const medicinesCollection = db.collection('medicines');
+    
+    // Tìm sản phẩm gốc
+    const originalProduct = await productsCollection.findOne({
+      $or: [
+        { name: { $regex: productName, $options: 'i' } },
+        { brand: { $regex: productName, $options: 'i' } }
+      ]
+    }) || await medicinesCollection.findOne({
+      $or: [
+        { name: { $regex: productName, $options: 'i' } },
+        { brand: { $regex: productName, $options: 'i' } }
+      ]
+    });
+    
+    if (!originalProduct) {
+      return [];
+    }
+    
+    // Lấy thông tin để tìm thuốc thay thế
+    const originalName = (originalProduct.name || '').toLowerCase();
+    const originalIndication = (originalProduct.indication || originalProduct.description || '').toLowerCase();
+    const originalCategory = (originalProduct.categoryName || originalProduct.category || '').toLowerCase();
+    
+    // Tìm các thuốc tương tự:
+    // 1. Cùng category/indication
+    // 2. Có tên tương tự (nhưng không phải chính nó)
+    // 3. Có trong kho
+    
+    const alternatives: any[] = [];
+    
+    // Tìm theo indication/description
+    if (originalIndication) {
+      const indicationKeywords = originalIndication.split(/\s+/).filter((w: string) => w.length > 3);
+      if (indicationKeywords.length > 0) {
+        const products = await productsCollection.find({
+          $and: [
+            {
+              $or: [
+                { indication: { $regex: indicationKeywords.join('|'), $options: 'i' } },
+                { description: { $regex: indicationKeywords.join('|'), $options: 'i' } }
+              ]
+            },
+            { name: { $not: { $regex: originalName, $options: 'i' } } },
+            { inStock: true },
+            { stockQuantity: { $gt: 0 } }
+          ]
+        })
+        .limit(limit)
+        .toArray();
+        
+        alternatives.push(...products);
+      }
+    }
+    
+    // Tìm theo category
+    if (originalCategory) {
+      const medicines = await medicinesCollection.find({
+        $and: [
+          { categoryName: { $regex: originalCategory, $options: 'i' } },
+          { name: { $not: { $regex: originalName, $options: 'i' } } }
+        ]
+      })
+      .limit(limit)
+      .toArray();
+      
+      // Convert medicines to product format
+      const convertedMedicines = medicines.map(med => ({
+        _id: med._id,
+        name: med.name,
+        price: med.price || 0,
+        description: med.description || med.indication || '',
+        brand: med.brand || '',
+        inStock: (med.stockQuantity || 0) > 0,
+        stockQuantity: med.stockQuantity || 0,
+        unit: med.unit || 'đơn vị',
+        imageUrl: med.imageUrl || '',
+        indication: med.indication || '',
+        categoryName: med.categoryName || ''
+      }));
+      
+      alternatives.push(...convertedMedicines);
+    }
+    
+    // Loại bỏ trùng lặp
+    const uniqueAlternatives = new Map<string, any>();
+    for (const alt of alternatives) {
+      const key = (alt.name || '').toLowerCase();
+      if (!uniqueAlternatives.has(key) && key !== originalName) {
+        uniqueAlternatives.set(key, alt);
+      }
+    }
+    
+    return Array.from(uniqueAlternatives.values()).slice(0, limit);
+  } catch (error) {
+    console.error('Error querying alternative medicines:', error);
+    return [];
+  }
+}
+
+// ============================================
+// PARSE THÔNG TIN BỆNH NHÂN
+// ============================================
+
+// Parse patient info from a message or entire conversation history
+function parsePatientInfo(message: string, conversationHistory?: ChatMessage[]) {
+  // Combine current message with all previous user messages to check for already provided info
+  let combinedText = normalizeText(message);
+  if (conversationHistory && conversationHistory.length > 0) {
+    const allUserMessages = conversationHistory
+      .filter(m => m.role === 'user')
+      .map(m => m.content)
+      .join(' ');
+    combinedText = normalizeText(allUserMessages + ' ' + message);
   }
   
-  return null;
+  const lower = combinedText;
+  const hasSymptom = ['cảm', 'cúm', 'sốt', 'ho', 'sổ mũi', 'nghẹt mũi', 'đau họng', 'nhức đầu', 'tiêu hóa', 'khó tiêu', 'đầy bụng', 'đau bụng']
+    .some(sym => lower.includes(sym));
+
+  // Extract age
+  let age: number | null = null;
+  let ageGroup: 'infant' | 'toddler' | 'child' | 'adolescent' | 'adult' | null = null;
+  
+  const ageMatch = lower.match(/(\d{1,3})\s*tuổi/i) || lower.match(/tôi\s+(\d{1,3})/i) || lower.match(/(\d{1,3})\s*yo/i);
+  if (ageMatch) {
+    age = parseInt(ageMatch[1]);
+    if (age >= 0 && age < 1) ageGroup = 'infant';
+    else if (age >= 1 && age < 6) ageGroup = 'toddler';
+    else if (age >= 6 && age < 12) ageGroup = 'child';
+    else if (age >= 12) ageGroup = 'adult'; // Từ 12 tuổi trở lên được coi là người lớn
+  } else if (lower.includes('trẻ sơ sinh') || lower.includes('trẻ dưới 1 tuổi')) {
+    ageGroup = 'infant';
+  } else if (lower.includes('trẻ nhỏ') || lower.includes('trẻ em dưới 6')) {
+    ageGroup = 'toddler';
+  } else if (lower.includes('trẻ em') && !lower.includes('dưới')) {
+    ageGroup = 'child';
+  } else if (lower.includes('người lớn') || lower.includes('vị thành niên')) {
+    ageGroup = 'adult';
+  }
+
+  const hasAge = age !== null || ageGroup !== null || /\d{1,2}\s*tuổi/.test(lower) || lower.includes('trẻ em') || lower.includes('người lớn');
+
+  // Extract pregnancy/breastfeeding info
+  const isPregnant = /(mang\s*thai|có\s*thai|bầu|đang\s*thai)/i.test(lower) && !/(không\s*mang\s*thai|không\s*có\s*thai|không\s*bầu)/i.test(lower);
+  const isBreastfeeding = /(cho\s*con\s*bú|đang\s*cho\s*con\s*bú)/i.test(lower) && !/(không\s*cho\s*con\s*bú)/i.test(lower);
+  const isMale = /(nam|đàn\s*ông|con\s*trai)/i.test(lower);
+  const hasPregnancyInfo = isPregnant || isBreastfeeding || /(không\s*mang\s*thai|không\s*bầu|không\s*có\s*thai|không\s*cho\s*con\s*bú)/i.test(lower) || isMale;
+
+  // Extract drug allergy info
+  const hasDrugAllergy = /(dị\s*ứng|dị\s*thuốc|tiền\s*sử\s*dị\s*ứng)/i.test(lower) && !/(không\s*dị\s*ứng|không\s*dị\s*thuốc)/i.test(lower);
+  const allergyDrugs: string[] = [];
+  if (hasDrugAllergy) {
+    // Try to extract drug names from allergy info
+    const allergyMatch = lower.match(/dị\s*ứng\s*(?:với|thuốc)?\s*([^,.\n]+)/i);
+    if (allergyMatch) {
+      allergyDrugs.push(allergyMatch[1].trim());
+    }
+  }
+  const hasDrugAllergyInfo = hasDrugAllergy || /(không\s*dị\s*ứng|không\s*dị\s*thuốc)/i.test(lower);
+
+  // Extract chronic disease info
+  const hasChronicDisease = /(bệnh\s*nền|có\s*bệnh)/i.test(lower) && !/(không\s*bệnh\s*nền|không\s*có\s*bệnh)/i.test(lower);
+  const chronicDiseases: string[] = [];
+  if (hasChronicDisease) {
+    const diseases = ['gan', 'thận', 'tim', 'dạ dày', 'huyết áp', 'tiểu đường', 'đái tháo đường', 'cao huyết áp'];
+    diseases.forEach(disease => {
+      if (lower.includes(disease)) {
+        chronicDiseases.push(disease);
+      }
+    });
+  }
+  const hasChronicInfo = hasChronicDisease || /(không\s*bệnh\s*nền|không\s*có\s*bệnh)/i.test(lower);
+
+  return {
+    hasSymptom,
+    hasAge,
+    age,
+    ageGroup,
+    hasPregnancyInfo,
+    isPregnant,
+    isBreastfeeding,
+    isMale,
+    hasDrugAllergyInfo,
+    hasDrugAllergy,
+    allergyDrugs,
+    hasChronicInfo,
+    hasChronicDisease,
+    chronicDiseases
+  };
+}
+
+function buildMissingInfoQuestions(info: ReturnType<typeof parsePatientInfo>): string | null {
+  const missing: string[] = [];
+  if (!info.hasAge) missing.push('Tuổi (người lớn/trẻ em)');
+  if (!info.hasPregnancyInfo) missing.push('Có đang mang thai/cho con bú không?');
+  if (!info.hasDrugAllergyInfo) missing.push('Có dị ứng thuốc không?');
+  if (!info.hasChronicInfo) missing.push('Có bệnh nền (gan, thận, tim, dạ dày, huyết áp...) không?');
+
+  if (missing.length === 0) return null;
+  
+  // Format với xuống dòng để dễ đọc
+  let response = 'Để tư vấn an toàn, bạn vui lòng cho biết thêm:\n\n';
+  missing.forEach((item, index) => {
+    response += `${index + 1}. ${item}\n`;
+  });
+  response += '\nCảm ơn bạn!';
+  
+  return response;
+}
+
+/**
+ * Filter thuốc theo thông tin bệnh nhân (độ tuổi, mang thai, bệnh nền, dị ứng)
+ */
+function filterMedicinesByPatientInfo(medicines: any[], patientInfo: ReturnType<typeof parsePatientInfo>): any[] {
+  if (!medicines || medicines.length === 0) return medicines;
+  
+  return medicines.filter(med => {
+    const medName = (med.name || '').toLowerCase();
+    const medIndication = (med.indication || med.description || '').toLowerCase();
+    
+    // 1. Filter theo độ tuổi
+    if (patientInfo.ageGroup) {
+      // Trẻ sơ sinh (0-1 tuổi): chỉ men vi sinh dạng giọt
+      if (patientInfo.ageGroup === 'infant') {
+        if (!medName.includes('men vi sinh') && !medName.includes('probiotic') && !medIndication.includes('men vi sinh')) {
+          return false; // Loại bỏ thuốc không phải men vi sinh cho trẻ sơ sinh
+        }
+        // Chỉ giữ men vi sinh dạng giọt
+        if (!medName.includes('giọt') && !medName.includes('drop')) {
+          return false;
+        }
+      }
+      
+      // Trẻ nhỏ (1-6 tuổi): tránh thuốc người lớn
+      if (patientInfo.ageGroup === 'toddler') {
+        // Loại bỏ thuốc có "người lớn" trong tên hoặc indication
+        if (medName.includes('người lớn') || medIndication.includes('người lớn')) {
+          return false;
+        }
+      }
+      
+      // Người lớn (12+): loại bỏ thuốc trẻ em
+      if (patientInfo.ageGroup === 'adult' && patientInfo.age && patientInfo.age >= 12) {
+        // Loại bỏ thuốc có "trẻ em" hoặc "trẻ nhỏ" trong tên (trừ khi là thuốc dùng chung)
+        if ((medName.includes('trẻ em') || medName.includes('trẻ nhỏ') || medName.includes('kids') || medName.includes('pediatric')) &&
+            !medIndication.includes('người lớn') && !medIndication.includes('cả trẻ em và người lớn')) {
+          return false;
+        }
+      }
+    }
+    
+    // 2. Filter theo mang thai/cho con bú
+    if (patientInfo.isPregnant || patientInfo.isBreastfeeding) {
+      // Loại bỏ thuốc có chống chỉ định cho phụ nữ mang thai
+      const contraindicatedForPregnancy = ['ibuprofen', 'aspirin', 'nsaid', 'corticoid', 'prednisolone', 'dexamethasone'];
+      if (contraindicatedForPregnancy.some(drug => medName.includes(drug) || medIndication.includes(drug))) {
+        return false;
+      }
+    }
+    
+    // 3. Filter theo dị ứng thuốc
+    if (patientInfo.hasDrugAllergy && patientInfo.allergyDrugs.length > 0) {
+      for (const allergyDrug of patientInfo.allergyDrugs) {
+        const allergyLower = allergyDrug.toLowerCase();
+        // Loại bỏ thuốc dị ứng hoặc thuốc cùng nhóm
+        if (medName.includes(allergyLower) || medIndication.includes(allergyLower)) {
+          return false;
+        }
+        
+        // Loại bỏ thuốc cùng nhóm (ví dụ: dị ứng Paracetamol thì tránh tất cả Paracetamol)
+        const drugGroups: { [key: string]: string[] } = {
+          'paracetamol': ['paracetamol', 'acetaminophen', 'panadol', 'efferalgan', 'hapacol'],
+          'ibuprofen': ['ibuprofen', 'nsaid', 'diclofenac', 'meloxicam'],
+          'aspirin': ['aspirin', 'acetylsalicylic'],
+          'penicillin': ['penicillin', 'amoxicillin', 'ampicillin', 'augmentin'],
+        };
+        
+        for (const [group, drugs] of Object.entries(drugGroups)) {
+          if (drugs.some(d => allergyLower.includes(d) || d.includes(allergyLower))) {
+            if (drugs.some(d => medName.includes(d) || medIndication.includes(d))) {
+              return false;
+            }
+          }
+        }
+      }
+    }
+    
+    // 4. Filter theo bệnh nền
+    if (patientInfo.hasChronicDisease && patientInfo.chronicDiseases.length > 0) {
+      for (const disease of patientInfo.chronicDiseases) {
+        const diseaseLower = disease.toLowerCase();
+        
+        // Bệnh gan: tránh thuốc chuyển hóa qua gan
+        if (diseaseLower.includes('gan')) {
+          if (medIndication.includes('chuyển hóa qua gan') || medName.includes('paracetamol')) {
+            // Paracetamol vẫn có thể dùng nhưng cần thận trọng - để AI quyết định
+            // Chỉ loại bỏ nếu có chống chỉ định rõ ràng
+          }
+        }
+        
+        // Bệnh thận: tránh thuốc chuyển hóa qua thận
+        if (diseaseLower.includes('thận')) {
+          if (medIndication.includes('chống chỉ định suy thận') || medName.includes('ibuprofen')) {
+            // Ibuprofen cần thận trọng với bệnh thận
+          }
+        }
+        
+        // Bệnh dạ dày: tránh thuốc kích ứng dạ dày
+        if (diseaseLower.includes('dạ dày') || diseaseLower.includes('bao tử')) {
+          if (medName.includes('ibuprofen') || medName.includes('aspirin') || medName.includes('nsaid') || 
+              medIndication.includes('kích ứng dạ dày') || medIndication.includes('loét dạ dày')) {
+            return false;
+          }
+        }
+        
+        // Bệnh tim/huyết áp: tránh thuốc ảnh hưởng tim mạch
+        if (diseaseLower.includes('tim') || diseaseLower.includes('huyết áp')) {
+          if (medIndication.includes('chống chỉ định bệnh tim') || medIndication.includes('tăng huyết áp')) {
+            return false;
+          }
+        }
+      }
+    }
+    
+    return true;
+  });
+}
+
+// Detect if current message is a follow-up answer to previous questions
+function isFollowUpAnswer(message: string, conversationHistory: ChatMessage[]): boolean {
+  const lower = normalizeText(message);
+  const indicators = [
+    /\b\d{1,2}\s*tuổi\b/,  // "22 tuổi", "30 tuổi"
+    /\d{1,2}\s*yo\b/i,      // "22 yo"
+    /không\s*dị\s*ứng/,     // "không dị ứng"
+    /không\s*dị\s*thuốc/,   // "không dị thuốc"
+    /không\s*bệnh\s*nền/,   // "không bệnh nền"
+    /không\s*có\s*bệnh/,    // "không có bệnh"
+    /mang\s*thai|cho\s*con\s*bú/,  // "mang thai", "cho con bú"
+    /không\s*mang\s*thai/,  // "không mang thai"
+    /người\s*lớn/,          // "người lớn"
+    /trẻ\s*em/              // "trẻ em"
+  ];
+  const isAnswer = indicators.some(p => p.test(lower));
+  if (!isAnswer) return false;
+
+  // Check if last assistant message asked for info (has question mark or asks for info)
+  const lastBot = [...conversationHistory].reverse().find(m => m.role === 'assistant');
+  if (!lastBot) return false;
+  
+  const lastBotLower = normalizeText(lastBot.content);
+  const isAskingForInfo = 
+    lastBot.content.includes('?') ||
+    lastBotLower.includes('vui lòng cho biết') ||
+    lastBotLower.includes('cần bổ sung') ||
+    lastBotLower.includes('bạn vui lòng') ||
+    lastBotLower.includes('cho biết thêm');
+  
+  return isAskingForInfo;
 }
 
 // AI response function with hybrid approach: LLM + Rule-based
@@ -585,6 +1431,249 @@ async function generateAIResponse(
   userId?: string
 ): Promise<string> {
   const lowerMessage = normalizeText(userMessage);
+
+  // ============================================
+  // KIỂM TRA NẾU LÀ MESSAGE ĐẦU TIÊN - HỎI THÔNG TIN CÁ NHÂN NGAY
+  // ============================================
+  // Nếu conversationHistory chỉ có 1 message (chào mừng) hoặc không có, đây là lần đầu tiên
+  const isFirstMessage = conversationHistory.length <= 1 || 
+    (conversationHistory.length === 1 && conversationHistory[0].role === 'assistant');
+  
+  // Parse thông tin từ message hiện tại và conversation history
+  const patientInfo = parsePatientInfo(userMessage, conversationHistory);
+  
+  // Nếu là message đầu tiên và chưa có đủ thông tin cá nhân, hỏi ngay
+  if (isFirstMessage) {
+    const missingInfo = buildMissingInfoQuestions(patientInfo);
+    if (missingInfo) {
+      // Kiểm tra xem message có phải là chào hỏi không (không phải câu hỏi về thuốc)
+      const isGreeting = /^(xin chào|chào|hi|hello|hey|tôi cần|tôi muốn|cho tôi|giúp tôi)/i.test(userMessage.trim());
+      const hasMedicalQuery = /(tư vấn|thuốc|bị|đau|sốt|ho|cảm|cúm|tiêu hóa|khó tiêu|đầy bụng)/i.test(userMessage);
+      
+      // Nếu chỉ là chào hỏi hoặc chưa có câu hỏi y tế cụ thể, hỏi thông tin cá nhân ngay
+      if (isGreeting || !hasMedicalQuery) {
+        return `Xin chào! Tôi là trợ lý AI của Nhà Thuốc Thông Minh. Tôi có thể giúp bạn tìm thông tin về thuốc, tư vấn sức khỏe, và hỗ trợ mua sắm.\n\n${missingInfo}`;
+      }
+    }
+  }
+
+  // ============================================
+  // PHÂN LOẠI INTENT CÂU HỎI
+  // ============================================
+  const { intent, extractedProductName } = classifyQuestionIntent(userMessage);
+  
+  // Xử lý các loại câu hỏi khác nhau
+  if (intent === 'stock_inquiry') {
+    // Câu hỏi về tồn kho
+    // Nếu không extract được tên, thử extract lại từ message gốc
+    let productName = extractedProductName;
+    if (!productName) {
+      // Thử extract lại với cách khác
+      productName = extractProductNameFromMessage(userMessage);
+    }
+    
+    // Nếu vẫn không extract được, thử tìm trong toàn bộ message
+    if (!productName) {
+      // Tìm các từ có chữ cái viết hoa (thường là tên sản phẩm)
+      const words = userMessage.split(/\s+/);
+      const potentialNames: string[] = [];
+      
+      for (let i = 0; i < words.length; i++) {
+        const word = words[i].replace(/[?.,!\-:;,\s]/g, '');
+        if (/^[A-ZÀ-ỹ]/.test(word) && word.length > 2) {
+          // Lấy từ này và các từ tiếp theo (có thể là tên sản phẩm nhiều từ)
+          let name = word;
+          let j = i + 1;
+          while (j < words.length && 
+                 (words[j].match(/^[A-ZÀ-ỹ]/) || words[j].match(/^[a-zà-ỹ]/)) &&
+                 !words[j].match(/^(còn|giá|thay|vậy|ạ|nhé|gì|nào|bao|nhiêu|biết|muốn|hỏi)$/i)) {
+            name += ' ' + words[j].replace(/[?.,!\-:;,\s]/g, '');
+            j++;
+          }
+          if (name.length >= 3 && name.length < 100) {
+            potentialNames.push(name);
+          }
+        }
+      }
+      
+      // Lấy tên dài nhất (thường là tên sản phẩm đầy đủ)
+      if (potentialNames.length > 0) {
+        productName = potentialNames.sort((a, b) => b.length - a.length)[0];
+      }
+    }
+    
+    if (!productName) {
+      return `Để mình kiểm tra tồn kho, bạn vui lòng cho mình biết tên sản phẩm cụ thể nhé.\n\nVí dụ: "Siro ho Ích Nhi còn bao nhiêu?" hoặc "Siro Ích Nhi còn không?"`;
+    }
+    
+    console.log(`[stock_inquiry] Đang tìm sản phẩm: "${productName}"`);
+    const productInfo = await queryProductStock(productName);
+    
+    if (productInfo) {
+      // Tạo prompt cho AI với thông tin tồn kho
+      const aiService = await import('../services/aiService.js').catch(() => null);
+      if (aiService) {
+        const context: any = {
+          queryType: 'stock_inquiry',
+          productInfo: productInfo
+        };
+        const response = await aiService.generateAIResponseWithGemini({
+          userMessage: userMessage,
+          conversationHistory: conversationHistory,
+          context: context
+        });
+        if (response) return response;
+      }
+      
+      // Fallback: trả lời trực tiếp
+      if (productInfo.inStock && productInfo.stockQuantity > 0) {
+        return `Hiện tại nhà thuốc còn ${productInfo.stockQuantity} ${productInfo.unit} ${productInfo.name}.\n\nGiá bán: ${productInfo.price.toLocaleString('vi-VN')}đ/${productInfo.unit}\n\nBạn có muốn mình tư vấn thêm cách sử dụng hoặc sản phẩm thay thế không?`;
+      } else {
+        return `Hiện tại nhà thuốc đã hết ${productInfo.name}.\n\nMình có thể tìm sản phẩm thay thế phù hợp cho bạn. Bạn có muốn mình tư vấn không?`;
+      }
+    } else {
+      // Thử tìm kiếm gần đúng hơn - tìm các sản phẩm có chứa một phần tên
+      const nameWords = productName.split(/\s+/).filter(w => w.length > 2);
+      if (nameWords.length > 0) {
+        // Tìm sản phẩm có chứa ít nhất 1 từ quan trọng
+        const db = mongoose.connection.db;
+        if (db) {
+          const productsCollection = db.collection('products');
+          const medicinesCollection = db.collection('medicines');
+          
+          const similarProducts = await productsCollection.find({
+            $or: nameWords.map(word => ({
+              name: { $regex: word, $options: 'i' }
+            }))
+          }).limit(5).toArray();
+          
+          if (similarProducts.length > 0) {
+            let response = `Mình không tìm thấy sản phẩm "${productName}" trong hệ thống.\n\n`;
+            response += `Có thể bạn đang tìm một trong các sản phẩm sau:\n\n`;
+            similarProducts.forEach((p, idx) => {
+              response += `${idx + 1}. ${p.name}${p.stockQuantity ? ` (Còn ${p.stockQuantity} ${p.unit || 'sản phẩm'})` : ''}\n`;
+            });
+            response += `\nBạn có thể hỏi lại với tên chính xác hoặc liên hệ dược sĩ để được hỗ trợ.`;
+            return response;
+          }
+        }
+      }
+      
+      return `Xin lỗi, mình không tìm thấy thông tin về sản phẩm "${productName}" trong hệ thống.\n\nBạn có thể:\n- Kiểm tra lại tên sản phẩm\n- Liên hệ trực tiếp với dược sĩ tại quầy để được hỗ trợ tốt hơn`;
+    }
+  }
+  
+  if (intent === 'price_inquiry') {
+    // Câu hỏi về giá
+    let productName = extractedProductName;
+    if (!productName) {
+      productName = extractProductNameFromMessage(userMessage);
+    }
+    
+    if (!productName) {
+      return `Để mình kiểm tra giá, bạn vui lòng cho mình biết tên sản phẩm cụ thể nhé.`;
+    }
+    
+    const productInfo = await queryProductPrice(productName);
+    if (productInfo) {
+      const aiService = await import('../services/aiService.js').catch(() => null);
+      if (aiService) {
+        const context: any = {
+          queryType: 'price_inquiry',
+          productInfo: productInfo
+        };
+        const response = await aiService.generateAIResponseWithGemini({
+          userMessage: userMessage,
+          conversationHistory: conversationHistory,
+          context: context
+        });
+        if (response) return response;
+      }
+      
+      // Fallback: trả lời trực tiếp
+      let priceText = `Giá bán: ${productInfo.price.toLocaleString('vi-VN')}đ/${productInfo.unit}`;
+      if (productInfo.originalPrice && productInfo.originalPrice > productInfo.price) {
+        priceText += `\nGiá gốc: ${productInfo.originalPrice.toLocaleString('vi-VN')}đ`;
+        if (productInfo.discountPercentage > 0) {
+          priceText += `\nGiảm ${productInfo.discountPercentage}%`;
+        }
+      }
+      if (!productInfo.inStock) {
+        priceText += `\n\n⚠️ Hiện tại sản phẩm đã hết hàng.`;
+      }
+      return `${productInfo.name}:\n${priceText}`;
+    } else {
+      return `Xin lỗi, mình không tìm thấy thông tin giá của sản phẩm "${productName}" trong hệ thống.\n\nBạn có thể mô tả rõ hơn tên sản phẩm hoặc liên hệ trực tiếp với dược sĩ tại quầy.`;
+    }
+  }
+  
+  if (intent === 'alternative_inquiry') {
+    // Câu hỏi về thuốc thay thế
+    let productName = extractedProductName;
+    if (!productName) {
+      productName = extractProductNameFromMessage(userMessage);
+    }
+    
+    if (!productName) {
+      return `Để mình tìm thuốc thay thế, bạn vui lòng cho mình biết tên sản phẩm cụ thể nhé.`;
+    }
+    
+    const alternatives = await queryAlternativeMedicines(productName, 5);
+    if (alternatives.length > 0) {
+      const aiService = await import('../services/aiService.js').catch(() => null);
+      if (aiService) {
+        const context: any = {
+          queryType: 'alternative_inquiry',
+          originalProductName: extractedProductName,
+          alternatives: alternatives
+        };
+        const response = await aiService.generateAIResponseWithGemini({
+          userMessage: userMessage,
+          conversationHistory: conversationHistory,
+          context: context
+        });
+        if (response) return response;
+      }
+      
+      // Fallback: trả lời trực tiếp
+      let response = `Nếu bạn đang tìm sản phẩm thay thế cho "${extractedProductName}", nhà thuốc hiện có các lựa chọn sau:\n\n`;
+      alternatives.forEach((alt, idx) => {
+        response += `${idx + 1}. **${alt.name}**\n`;
+        if (alt.indication || alt.description) {
+          response += `   - Tác dụng: ${(alt.indication || alt.description).substring(0, 100)}\n`;
+        }
+        if (alt.price) {
+          response += `   - Giá: ${alt.price.toLocaleString('vi-VN')}đ/${alt.unit || 'sản phẩm'}\n`;
+        }
+        if (alt.stockQuantity) {
+          response += `   - Tồn kho: ${alt.stockQuantity} ${alt.unit || 'sản phẩm'}\n`;
+        }
+        response += '\n';
+      });
+      response += `Tùy độ tuổi và tình trạng sức khỏe, mình có thể tư vấn kỹ hơn cho bạn nhé.`;
+      return response;
+    } else {
+      return `Xin lỗi, mình không tìm thấy sản phẩm thay thế phù hợp cho "${productName}" trong kho hiện tại.\n\nBạn có thể liên hệ trực tiếp với dược sĩ tại quầy để được tư vấn cụ thể hơn.`;
+    }
+  }
+
+  // Detect if this is a follow-up answer to previous safety questions
+  const followUpAnswer = isFollowUpAnswer(userMessage, conversationHistory);
+  const previousSymptomMessage = followUpAnswer
+    ? [...conversationHistory].reverse().find(m =>
+        m.role === 'user' &&
+        /(cảm|cúm|sốt|ho|sổ mũi|nghẹt mũi|đau họng|nhức đầu|viêm|dị ứng|đau bụng|tiêu chảy)/i.test(m.content)
+      )
+    : null;
+
+  // Use combined message to retain context when user is only providing follow-up info
+  const combinedSymptomMessage = previousSymptomMessage
+    ? `${previousSymptomMessage.content}\nThông tin bổ sung: ${userMessage}`
+    : userMessage;
+  const lowerCombinedMessage = normalizeText(combinedSymptomMessage);
+  
+  // Cache for products queried in AI context (to avoid duplicate queries in rule-based fallback)
+  let cachedProduct: any = null;
   
   // Try to use AI LLM first (if configured)
   try {
@@ -595,14 +1684,20 @@ async function generateAIResponse(
       // Get context for AI (medicines, user history, etc.)
       const context: any = {};
       
+      // Add patient info to context
+      context.patientInfo = patientInfo;
+      context.isFollowUpAnswer = followUpAnswer;
+      
       // Try to get relevant medicines for context
       const symptomKeywords = Object.keys(symptomToMedicines).filter(symptom => 
-        lowerMessage.includes(symptom)
+        lowerCombinedMessage.includes(symptom)
       );
       if (symptomKeywords.length > 0) {
-        const suggestedMedicines = await semanticSearch(userMessage);
+        const suggestedMedicines = await semanticSearch(combinedSymptomMessage || userMessage);
         if (suggestedMedicines.length > 0) {
-          context.medicines = suggestedMedicines.slice(0, 5);
+          // Filter medicines by patient info
+          const filteredMedicines = filterMedicinesByPatientInfo(suggestedMedicines, patientInfo);
+          context.medicines = filteredMedicines.slice(0, 5);
           context.symptoms = symptomKeywords;
         }
       }
@@ -614,6 +1709,14 @@ async function generateAIResponse(
           context.userHistory = purchaseHistory.slice(0, 5);
         }
       }
+      
+      // Add query type and instruction for AI
+      if (intent === 'medical_consultation') {
+        context.queryType = 'symptom_based';
+        context.instruction = 'Tư vấn thuốc dựa trên triệu chứng, có xem xét thông tin bệnh nhân (tuổi, mang thai, dị ứng, bệnh nền)';
+      }
+      
+      // Note: Stock and price inquiries are already handled above in intent classification
       
       // Try Google Gemini first (free tier, good for Vietnamese)
       const geminiResponse = await aiService.generateAIResponseWithGemini({
@@ -648,8 +1751,12 @@ async function generateAIResponse(
         return ollamaResponse;
       }
     }
-  } catch (error) {
-    console.log('AI service not available, using rule-based system:', error);
+  } catch (error: any) {
+    // Log error but don't spam console
+    const errorMessage = error?.message || '';
+    if (!errorMessage.includes('ECONNREFUSED') && !errorMessage.includes('fetch failed')) {
+      console.log('AI service not available, using rule-based system:', errorMessage.substring(0, 100));
+    }
     // Continue with rule-based system
   }
   
@@ -733,13 +1840,25 @@ async function generateAIResponse(
       lowerMessage.includes('còn bao nhiêu') || lowerMessage.includes('còn không')) {
     const medicineName = extractMedicineNameFromQuery(userMessage);
     if (medicineName) {
-      const products = await searchProductsWithFilters([medicineName]);
+      // Note: cachedProduct is set in AI context section above if AI service was called
+      // If AI service failed or wasn't available, cachedProduct will be null and we query here
+      let products: any[] = [];
+      if (cachedProduct) {
+        products = [cachedProduct];
+        console.log('📦 Using cached product for stock inquiry (from AI context)');
+      } else {
+        products = await searchProductsWithFilters([medicineName]);
+      }
+      
       if (products.length > 0) {
         let response = `📦 **Tình trạng tồn kho:**\n\n`;
         products.slice(0, 3).forEach(product => {
           response += `- **${product.name}**\n`;
           if (product.stockQuantity !== undefined && product.stockQuantity > 0) {
             response += `  ✅ Còn hàng: ${product.stockQuantity} ${product.unit || 'sản phẩm'}\n`;
+            if (product.price) {
+              response += `  💰 Giá: ${product.price.toLocaleString('vi-VN')}đ/${product.unit || 'sản phẩm'}\n`;
+            }
           } else {
             response += `  ❌ Hết hàng\n`;
           }
@@ -1094,16 +2213,46 @@ async function searchProductsWithFilters(
     // Build search query
     const searchConditions: any[] = [];
     
-    // Keyword search
+    // Keyword search - improved for Vietnamese text matching
     if (keywords.length > 0) {
       searchConditions.push({
-        $or: keywords.map(keyword => ({
-          $or: [
-            { name: { $regex: keyword, $options: 'i' } },
-            { description: { $regex: keyword, $options: 'i' } },
-            { brand: { $regex: keyword, $options: 'i' } },
-          ]
-        }))
+        $or: keywords.map(keyword => {
+          // Escape special regex characters
+          const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          
+          // Create multiple search patterns for better matching
+          const patterns = [
+            // Exact match (case-insensitive)
+            { name: { $regex: `^${escapedKeyword}$`, $options: 'i' } },
+            // Starts with keyword
+            { name: { $regex: `^${escapedKeyword}`, $options: 'i' } },
+            // Contains keyword
+            { name: { $regex: escapedKeyword, $options: 'i' } },
+            // Match in description
+            { description: { $regex: escapedKeyword, $options: 'i' } },
+            // Match in brand
+            { brand: { $regex: escapedKeyword, $options: 'i' } },
+          ];
+          
+          // For multi-word keywords, also try matching all words
+          if (keyword.includes(' ')) {
+            const words = keyword.split(/\s+/).filter(w => w.length > 2);
+            if (words.length > 1) {
+              // Match if all words are present (in any order)
+              patterns.push({
+                $and: words.map(word => ({
+                  $or: [
+                    { name: { $regex: word, $options: 'i' } },
+                    { description: { $regex: word, $options: 'i' } },
+                    { brand: { $regex: word, $options: 'i' } },
+                  ]
+                }))
+              });
+            }
+          }
+          
+          return { $or: patterns };
+        })
       });
     }
     
@@ -1134,28 +2283,43 @@ async function searchProductsWithFilters(
       });
     }
     
-    // Build final query
-    const query: any = {
-      inStock: true,
-      stockQuantity: { $gt: 0 }
-    };
+    // Build final query - first try with inStock filter
+    let query: any = {};
     
     if (searchConditions.length > 0) {
       query.$and = searchConditions;
     }
     
-    // Search in products collection
-    let products = await productsCollection.find(query)
+    // First search: only in-stock products (for stock inquiry, we want to know current stock)
+    const inStockQuery: any = {
+      ...query,
+      inStock: true,
+      stockQuantity: { $gt: 0 }
+    };
+    
+    // Search in products collection (in-stock first)
+    let products = await productsCollection.find(inStockQuery)
       .limit(10)
       .toArray();
     
-    // If no products found, search in medicines collection
+    // If no in-stock products found, search all products (including out-of-stock)
+    // This allows us to tell user "hết hàng" instead of "không tìm thấy"
+    if (products.length === 0 && searchConditions.length > 0) {
+      console.log('No in-stock products found, searching all products...');
+      products = await productsCollection.find(query)
+        .limit(10)
+        .toArray();
+    }
+    
+    // If still no products found, search in medicines collection
     if (products.length === 0) {
-      const medicines = await medicinesCollection.find({
-        $and: searchConditions.length > 0 ? searchConditions : [{}]
-      })
-      .limit(10)
-      .toArray();
+      const medicinesQuery: any = searchConditions.length > 0 
+        ? { $and: searchConditions } 
+        : {};
+      
+      const medicines = await medicinesCollection.find(medicinesQuery)
+        .limit(10)
+        .toArray();
       
       // Convert medicines to product-like format
       products = medicines.map(med => ({
@@ -1163,11 +2327,21 @@ async function searchProductsWithFilters(
         price: med.price || 0,
         description: med.description || med.indication || '',
         brand: med.brand || '',
-        inStock: true,
+        inStock: (med.stockQuantity || 0) > 0,
         stockQuantity: med.stockQuantity || 0,
         unit: med.unit || 'đơn vị',
         imageUrl: med.imageUrl || ''
       }));
+    }
+    
+    // Log search results for debugging
+    if (products.length > 0) {
+      console.log(`Found ${products.length} products for keywords:`, keywords);
+      products.forEach((p, idx) => {
+        console.log(`  ${idx + 1}. ${p.name} (stock: ${p.stockQuantity || 0}, inStock: ${p.inStock})`);
+      });
+    } else {
+      console.log('No products found for keywords:', keywords);
     }
     
     return products;

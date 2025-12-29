@@ -562,9 +562,9 @@ export async function findSimilarMedicines(
     // - Same category (if we can determine category)
     // Note: This would require category matching logic
 
-    // - Popular products (isHot, isNew)
+    // - Popular products (isHot, isNewProduct)
     if (product.isHot) score += 0.05;
-    if (product.isNew) score += 0.03;
+    if (product.isNewProduct) score += 0.03;
 
     scoredProducts.push({
       product,
@@ -583,92 +583,8 @@ export async function findSimilarMedicines(
     confidence: item.confidence
   }));
 
-  // Step 5: If no results found, try broader search strategies
-  if (similarProducts.length === 0) {
-    console.log(`⚠️ No similar medicines found, trying broader search...`);
-    
-    // Strategy 1: Search by description/keywords
-    const keywords = baseName.split(/\s+/).filter(w => w.length > 2);
-    if (keywords.length > 0) {
-      const keywordPattern = keywords.map(k => escapeRegex(k)).join('|') || '.*';
-      const keywordProducts = await Product.find({
-        $or: [
-          { description: { $regex: keywordPattern, $options: 'i' } },
-          { name: { $regex: keywordPattern, $options: 'i' } },
-        ],
-        inStock: true,
-      })
-      .populate('categoryId', 'name')
-      .limit(limit * 2)
-      .sort({ isHot: -1, stockQuantity: -1 }); // Prefer hot and high stock products
-      
-      for (const product of keywordProducts) {
-        const productId = String(product._id);
-        if (!seenIds.has(productId)) {
-          seenIds.add(productId);
-          similarProducts.push({
-            ...product.toObject(),
-            matchReason: 'keyword_match',
-            confidence: 0.4
-          });
-          if (similarProducts.length >= limit) break;
-        }
-      }
-    }
-    
-    // Strategy 2: If still no results, suggest popular/hot medicines
-    if (similarProducts.length === 0) {
-      console.log(`⚠️ Still no results, suggesting popular medicines...`);
-      const popularProducts = await Product.find({
-        $or: [
-          { isHot: true },
-          { isNew: true },
-          { stockQuantity: { $gte: 10 } },
-        ],
-        inStock: true,
-      })
-      .populate('categoryId', 'name')
-      .limit(limit)
-      .sort({ isHot: -1, isNew: -1, stockQuantity: -1 });
-      
-      for (const product of popularProducts) {
-        const productId = String(product._id);
-        if (!seenIds.has(productId)) {
-          seenIds.add(productId);
-          similarProducts.push({
-            ...product.toObject(),
-            matchReason: 'popular_medicine',
-            confidence: 0.3
-          });
-          if (similarProducts.length >= limit) break;
-        }
-      }
-    }
-    
-    // Strategy 3: Last resort - any available medicines
-    if (similarProducts.length === 0) {
-      console.log(`⚠️ No popular medicines, suggesting any available medicines...`);
-      const anyProducts = await Product.find({
-        inStock: true,
-      })
-      .populate('categoryId', 'name')
-      .limit(limit)
-      .sort({ stockQuantity: -1, createdAt: -1 });
-      
-      for (const product of anyProducts) {
-        const productId = String(product._id);
-        if (!seenIds.has(productId)) {
-          seenIds.add(productId);
-          similarProducts.push({
-            ...product.toObject(),
-            matchReason: 'general_suggestion',
-            confidence: 0.2
-          });
-          if (similarProducts.length >= limit) break;
-        }
-      }
-    }
-  }
+  // Step 5: No fallback logic - only return medicines found by similarity search (synchronized with Web)
+  // Removed fallback to popular/any medicines to match Web behavior
 
   // Step 6: Search by indication/groupTherapeutic from medicines collection (ported from web)
   const db = mongoose.connection.db;

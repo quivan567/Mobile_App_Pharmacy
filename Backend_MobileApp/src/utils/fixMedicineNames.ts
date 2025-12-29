@@ -121,7 +121,7 @@ async function createMissingMedicinesFromFiles() {
           inStock: true,
           stockQuantity: 20 + Math.floor(Math.random() * 180),
           isHot: false,
-          isNew: true,
+          isNewProduct: true,
           isPrescription: false,
           expirationDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
           manufacturingDate: new Date(Date.now() - 180 * 24 * 60 * 60 * 1000),

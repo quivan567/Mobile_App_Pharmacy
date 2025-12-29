@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, ScrollView, TextInput, Modal, ActivityIndicator, RefreshControl } from 'react-native';
 import { Image } from 'expo-image';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, keepPreviousData, useQueryClient } from '@tanstack/react-query';
 import { medicinesApi } from '../../api/medicines';
 import { categoriesApi } from '../../api/categories';
@@ -18,6 +18,7 @@ import { Button } from '../../components/common/Button';
 import { highlightText } from '../../utils/textHighlight';
 
 export default function MedicineListScreen({ navigation, route }: any) {
+  const insets = useSafeAreaInsets();
   const { addToCart } = useCart();
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
@@ -126,6 +127,13 @@ export default function MedicineListScreen({ navigation, route }: any) {
     const [fallbackError, setFallbackError] = useState(false);
     const [imageLoading, setImageLoading] = useState(true);
     
+    // Reset error states when item changes
+    useEffect(() => {
+      setImageError(false);
+      setFallbackError(false);
+      setImageLoading(true);
+    }, [item._id, item.imageUrl]);
+    
     const primaryImageUrl = useMemo(() => {
       const url = getImageUrlWithFallback(item, false, false);
       return url; // Can be string or null
@@ -150,18 +158,28 @@ export default function MedicineListScreen({ navigation, route }: any) {
 
     const handleError = useCallback((error: any) => {
       // Only log errors in development to reduce noise
-      logger.error('[MedicineListScreen] Image load error:', {
-        medicineId: item._id,
-        medicineName: item.name,
-        imageUrl: item.imageUrl,
-        currentImageUrl,
-        error: error?.message || error
-      });
+      // Check if error is a 400 or 404 (common for missing images)
+      const errorMessage = error?.message || String(error || '');
+      const is400Error = errorMessage.includes('400') || errorMessage.includes('status code: 400');
+      const is404Error = errorMessage.includes('404') || errorMessage.includes('Not Found') || errorMessage.includes('status code: 404');
+      
+      // Only log non-404/400 errors (these are expected for missing images)
+      if (!is400Error && !is404Error) {
+        logger.error('[MedicineListScreen] Image load error:', {
+          medicineId: item._id,
+          medicineName: item.name,
+          imageUrl: item.imageUrl,
+          currentImageUrl,
+          error: errorMessage
+        });
+      }
       
       // Try fallback chain: primary -> fallback -> local placeholder
       if (!imageError && primaryImageUrl) {
+        // Primary image failed, try fallback
         setImageError(true);
       } else if (!fallbackError) {
+        // Fallback also failed, show placeholder
         setFallbackError(true);
       }
       // After both fail, we'll show local placeholder (no more retries)
@@ -392,7 +410,7 @@ export default function MedicineListScreen({ navigation, route }: any) {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
+            <View style={[styles.modalHeader, { paddingTop: Math.max(insets.top, 20) }]}>
               <Text style={styles.modalTitle}>Bộ lọc</Text>
               <TouchableOpacity onPress={() => setShowFilters(false)}>
                 <Ionicons name="close" size={24} color={COLORS.text} />

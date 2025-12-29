@@ -137,7 +137,7 @@ export interface IProduct extends mongoose.Document {
   inStock: boolean;
   stockQuantity: number;
   isHot: boolean;
-  isNew: boolean;
+  isNewProduct: boolean;
   isPrescription: boolean;
   // Expiration tracking fields
   expirationDate?: Date;
@@ -204,7 +204,7 @@ const productSchema = new Schema({
     type: Boolean,
     default: false,
   },
-  isNew: {
+  isNewProduct: {
     type: Boolean,
     default: false,
   },
@@ -242,10 +242,10 @@ export interface IOrder extends Document {
   couponCode?: string;
   shippingAddress: string;
   shippingPhone: string;
-  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'momo' | 'zalopay' | 'vnpay';
+  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'momo' | 'vnpay';
   paymentStatus: 'pending' | 'paid' | 'failed' | 'refunded';
-  momoOrderId?: string; // MoMo's orderId (used for querying payment status)
-  momoRequestId?: string; // MoMo's requestId (used for querying payment status)
+  momoOrderId?: string; // Store MoMo orderId for payment status queries
+  vnpayTransactionNo?: string; // Store VNPay transaction number
   notes?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -298,7 +298,7 @@ const orderSchema = new Schema<IOrder>({
   },
   paymentMethod: {
     type: String,
-    enum: ['cash', 'card', 'bank_transfer', 'momo', 'zalopay', 'vnpay'],
+    enum: ['cash', 'card', 'bank_transfer', 'momo', 'vnpay'],
     required: true,
   },
   paymentStatus: {
@@ -309,10 +309,12 @@ const orderSchema = new Schema<IOrder>({
   momoOrderId: {
     type: String,
     trim: true,
+    sparse: true, // Allow multiple null values
   },
-  momoRequestId: {
+  vnpayTransactionNo: {
     type: String,
     trim: true,
+    sparse: true, // Allow multiple null values
   },
   notes: {
     type: String,
@@ -389,26 +391,18 @@ const cartSchema = new Schema<ICart>({
 // Prescription Schema
 export interface IPrescription extends Document {
   userId: mongoose.Types.ObjectId;
+  prescriptionNumber?: string;
   customerName: string;
   phoneNumber: string;
   doctorName: string;
   hospitalName?: string;
   prescriptionImage: string;
   examinationDate?: Date;
+  dateOfBirth?: Date; // Ngày tháng năm sinh
   diagnosis?: string;
   status: 'pending' | 'approved' | 'rejected' | 'saved';
   notes?: string;
   rejectionReason?: string;
-  prescriptionNumber?: string; // Optional unique prescription number
-  suggestedMedicines?: Array<{
-    productId: string;
-    productName: string;
-    price: number;
-    unit: string;
-    confidence?: number;
-    matchReason?: string;
-    originalText?: string;
-  }>; // Suggested medicines from analysis
   createdAt: Date;
   updatedAt: Date;
 }
@@ -419,6 +413,12 @@ const prescriptionSchema = new Schema<IPrescription>({
     ref: 'User',
     required: true,
   },
+  prescriptionNumber: {
+    type: String,
+    unique: true,
+    sparse: true, // Allow multiple null values, but enforce uniqueness for non-null values
+    trim: true,
+  },
   customerName: {
     type: String,
     required: true,
@@ -426,7 +426,7 @@ const prescriptionSchema = new Schema<IPrescription>({
   },
   phoneNumber: {
     type: String,
-    required: true,
+    default: '',
     trim: true,
   },
   doctorName: {
@@ -443,6 +443,9 @@ const prescriptionSchema = new Schema<IPrescription>({
     required: true,
   },
   examinationDate: {
+    type: Date,
+  },
+  dateOfBirth: {
     type: Date,
   },
   diagnosis: {
@@ -462,39 +465,6 @@ const prescriptionSchema = new Schema<IPrescription>({
     type: String,
     trim: true,
   },
-  prescriptionNumber: {
-    type: String,
-    trim: true,
-    unique: true,
-    sparse: true, // Only index non-null values to avoid duplicate null error
-  },
-  suggestedMedicines: [{
-    productId: {
-      type: String,
-      required: true,
-    },
-    productName: {
-      type: String,
-      required: true,
-    },
-    price: {
-      type: Number,
-      required: true,
-    },
-    unit: {
-      type: String,
-      required: true,
-    },
-    confidence: {
-      type: Number,
-    },
-    matchReason: {
-      type: String,
-    },
-    originalText: {
-      type: String,
-    },
-  }],
 }, {
   timestamps: true,
 });
@@ -617,9 +587,9 @@ export interface IInvoice extends Document {
   taxAmount: number;
   taxPercentage: number;
   totalAmount: number;
-  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'momo' | 'zalopay';
+  paymentMethod: 'cash' | 'card' | 'bank_transfer' | 'momo' | 'zalopay' | 'cod' | 'qr' | 'atm' | 'vnpay';
   paymentStatus: 'pending' | 'paid' | 'partial' | 'refunded';
-  status: 'draft' | 'confirmed' | 'completed' | 'cancelled';
+  status: 'draft' | 'confirmed' | 'completed' | 'cancelled' | 'pending' | 'processing' | 'shipped' | 'delivered';
   notes?: string;
   prescriptionId?: mongoose.Types.ObjectId;
   pharmacistId?: mongoose.Types.ObjectId;
@@ -1006,6 +976,70 @@ const exportSchema = new Schema<IExport>({
   timestamps: true,
 });
 
+// Product Batch Schema (Quản lý từng lô hàng)
+export interface IProductBatch extends Document {
+  productId: mongoose.Types.ObjectId;
+  batchNumber: string;
+  expirationDate: Date;
+  manufacturingDate?: Date;
+  quantity: number; // Số lượng ban đầu của lô
+  remainingQuantity: number; // Số lượng còn lại sau khi bán
+  importId: mongoose.Types.ObjectId; // Link đến phiếu nhập
+  importNumber: string; // Số phiếu nhập để dễ tra cứu
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+const productBatchSchema = new Schema<IProductBatch>({
+  productId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Product',
+    required: true,
+    index: true,
+  },
+  batchNumber: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  expirationDate: {
+    type: Date,
+    required: true,
+    index: true, // Index để sort theo FEFO
+  },
+  manufacturingDate: {
+    type: Date,
+  },
+  quantity: {
+    type: Number,
+    required: true,
+    min: 1,
+  },
+  remainingQuantity: {
+    type: Number,
+    required: true,
+    min: 0,
+  },
+  importId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Import',
+    required: true,
+  },
+  importNumber: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+}, {
+  timestamps: true,
+});
+
+// Indexes for better performance
+productBatchSchema.index({ productId: 1, expirationDate: 1 }); // For FEFO sorting
+productBatchSchema.index({ productId: 1, createdAt: 1 }); // For FIFO sorting
+productBatchSchema.index({ batchNumber: 1 });
+productBatchSchema.index({ importId: 1 });
+
 // Stock Movement Schema (Lịch sử tồn kho)
 export interface IStockMovement extends Document {
   productId: mongoose.Types.ObjectId;
@@ -1096,7 +1130,7 @@ categorySchema.index({ slug: 1 });
 productSchema.index({ name: 'text', description: 'text', brand: 'text' });
 productSchema.index({ categoryId: 1 });
 productSchema.index({ isHot: 1 });
-productSchema.index({ isNew: 1 });
+productSchema.index({ isNewProduct: 1 });
 orderSchema.index({ userId: 1 });
 orderSchema.index({ orderNumber: 1 });
 cartSchema.index({ userId: 1 });
@@ -1442,6 +1476,7 @@ export const Invoice = mongoose.model<IInvoice>('Invoice', invoiceSchema);
 export const Import = mongoose.model<IImport>('Import', importSchema);
 export const Export = mongoose.model<IExport>('Export', exportSchema);
 export const StockMovement = mongoose.model<IStockMovement>('StockMovement', stockMovementSchema);
+export const ProductBatch = mongoose.model<IProductBatch>('ProductBatch', productBatchSchema);
 export const Coupon = mongoose.model<ICoupon>('Coupon', couponSchema);
 export const CouponUsage = mongoose.model<ICouponUsage>('CouponUsage', couponUsageSchema);
 export const SavedPrescription = mongoose.model<ISavedPrescription>('SavedPrescription', savedPrescriptionSchema);

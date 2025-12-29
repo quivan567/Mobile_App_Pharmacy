@@ -16,7 +16,7 @@ export function toProductDto(p: any) {
     inStock: !!p.inStock,
     stockQuantity: p.stockQuantity ?? 0,
     isHot: !!p.isHot,
-    isNew: !!p.isNew,
+    isNewProduct: !!p.isNewProduct,
     isPrescription: !!p.isPrescription,
     // Expiration tracking fields
     expirationDate: p.expirationDate,
@@ -43,7 +43,7 @@ export class ProductController {
         maxPrice,
         inStock,
         isHot,
-        isNew,
+        isNewProduct,
         sortBy = 'createdAt',
         sortOrder = 'desc',
       } = req.query;
@@ -92,8 +92,8 @@ export class ProductController {
       }
 
       // Filter by new products
-      if (isNew !== undefined) {
-        conditions.isNew = isNew === 'true';
+      if (isNewProduct !== undefined) {
+        conditions.isNewProduct = isNewProduct === 'true';
       }
 
       // Build query
@@ -271,7 +271,7 @@ export class ProductController {
     try {
       const { limit = 10 } = req.query;
 
-      const newProducts = await Product.find({ isNew: true, inStock: true })
+      const newProducts = await Product.find({ isNewProduct: true, inStock: true })
         .sort({ createdAt: -1 })
         .limit(Number(limit))
         .lean();

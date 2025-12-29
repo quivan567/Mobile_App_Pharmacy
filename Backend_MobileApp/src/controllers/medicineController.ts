@@ -15,7 +15,7 @@ export class MedicineController {
         sortOrder = 'desc',
         inStock,
         isHot,
-        isNew,
+        isNewProduct,
         minPrice,
         maxPrice,
         fuzzy = 'true', // Enable fuzzy search by default
@@ -88,8 +88,8 @@ export class MedicineController {
       }
 
       // Filter by new flag
-      if (isNew !== undefined) {
-        conditions.isNew = isNew === 'true' || isNew === true;
+      if (isNewProduct !== undefined) {
+        conditions.isNewProduct = isNewProduct === 'true' || isNewProduct === true;
       }
 
       // Validate sortBy
@@ -173,7 +173,7 @@ export class MedicineController {
         minStock: 10,
         expiryDate: product.expirationDate,
         isHot: product.isHot || false,
-        isNew: product.isNew || false,
+        isNewProduct: product.isNewProduct || false,
         inStock: product.inStock || false,
         createdAt: product.createdAt,
         updatedAt: product.updatedAt,
@@ -267,7 +267,7 @@ export class MedicineController {
         minStock: 10,
         expiryDate: product.expirationDate,
         isHot: product.isHot || false,
-        isNew: product.isNew || false,
+        isNewProduct: product.isNewProduct || false,
         inStock: product.inStock || false,
         description: product.description || '',
         createdAt: product.createdAt,
@@ -322,7 +322,7 @@ export class MedicineController {
         minStock: 10,
         expiryDate: product.expirationDate,
         isHot: product.isHot || false,
-        isNew: product.isNew || false,
+        isNewProduct: product.isNewProduct || false,
         inStock: product.inStock || false,
         createdAt: product.createdAt,
       }));
@@ -382,7 +382,7 @@ export class MedicineController {
         inStock: stock > 0,
         stockQuantity: stock || 0,
         isHot: false,
-        isNew: true, // Mark as new when created
+        isNewProduct: true, // Mark as new when created
         isPrescription: name.toLowerCase().includes('prescription') || 
                        genericName.toLowerCase().includes('prescription') ||
                        category.toLowerCase().includes('kê đơn'),

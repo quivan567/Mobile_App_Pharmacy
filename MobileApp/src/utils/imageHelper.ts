@@ -84,7 +84,7 @@ export function getImageUrlWithFallback(medicine: any, hasError: boolean = false
   }
 
   // If primary failed, try fallback
-  if (hasError) {
+  if (hasError && !hasFallbackError) {
     const fallbackUrl = getFallbackImageUrl(medicine);
     return fallbackUrl || null;
   }

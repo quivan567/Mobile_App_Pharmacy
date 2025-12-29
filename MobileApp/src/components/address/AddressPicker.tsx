@@ -9,6 +9,7 @@ import {
   TextInput,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '../../utils/constants';
 import {
   getProvinces,
@@ -40,6 +41,7 @@ const AddressPicker: React.FC<AddressPickerProps> = ({
   disabled = false,
   searchable = true,
 }) => {
+  const insets = useSafeAreaInsets();
   const [modalVisible, setModalVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredOptions, setFilteredOptions] = useState(options);
@@ -105,7 +107,7 @@ const AddressPicker: React.FC<AddressPickerProps> = ({
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
+            <View style={[styles.modalHeader, { paddingTop: Math.max(insets.top, 16) }]}>
               <Text style={styles.modalTitle}>{label}</Text>
               <TouchableOpacity
                 onPress={() => {

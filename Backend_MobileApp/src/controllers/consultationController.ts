@@ -7,6 +7,10 @@ import fs from 'fs';
 import mongoose from 'mongoose';
 import { extractTextFromImage, extractPrescriptionInfo, processPrescriptionImage } from '../services/ocrService.js';
 import {
+  uploadToSupabase,
+  STORAGE_BUCKETS,
+} from '../services/supabaseService.js';
+import {
   findExactMatch,
   findSimilarMedicines,
   parseMedicineName,
@@ -15,6 +19,31 @@ import {
 // Gemini API disabled for prescription analysis
 // import { generatePrescriptionAdviceWithGemini } from '../services/geminiService.js';
 import { StockService } from '../services/stockService.js';
+import { medicineMetadataService } from '../services/medicineMetadataService.js';
+
+// Helper function to upload prescription image to Supabase
+async function uploadPrescriptionImageToSupabase(
+  filePath: string,
+  originalName: string
+): Promise<string> {
+  try {
+    const supabaseResult = await uploadToSupabase(
+      STORAGE_BUCKETS.PRESCRIPTIONS,
+      filePath,
+      `prescription-${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(originalName)}`,
+      {
+        contentType: 'image/jpeg',
+      }
+    );
+    if (supabaseResult) {
+      console.log('✅ Prescription image uploaded to Supabase:', supabaseResult.url);
+      return supabaseResult.url;
+    }
+  } catch (supabaseError: any) {
+    console.warn('⚠️ Supabase upload failed, using local path:', supabaseError.message);
+  }
+  return filePath; // Fallback to local path
+}
 
 // Helpers ported from web consultation controller for richer matching/explanations
 function normalizeForComparison(name: string): string {
@@ -71,6 +100,293 @@ function isMedicineAlreadyInPrescription(medicine: any, foundMedicines: any[]): 
 
     return false;
   });
+}
+
+// Helper function to normalize medicine values for comparison
+function normalizeMedicineValue(value: string | null | undefined): string {
+  if (!value) return '';
+  return value.trim().toLowerCase();
+}
+
+// Helper function to check if two dosage forms are equivalent
+async function isDosageFormEquivalent(form1: string, form2: string): Promise<boolean> {
+  const normalized1 = normalizeMedicineValue(form1);
+  const normalized2 = normalizeMedicineValue(form2);
+  
+  if (normalized1 === normalized2) return true;
+  
+  // Bỏ qua nếu một trong hai là rỗng - database có thể thiếu dữ liệu
+  if (!normalized1 || normalized1 === '') return true;
+  if (!normalized2 || normalized2 === '') return true;
+  
+  // Kiểm tra nếu một chuỗi chứa từ khóa chính của chuỗi kia
+  const keyWords1 = normalized1.split(/\s+/).filter(w => w.length > 2);
+  const keyWords2 = normalized2.split(/\s+/).filter(w => w.length > 2);
+  
+  for (const keyword of keyWords1) {
+    if (normalized2.includes(keyword) && keyword.length > 2) {
+      return true;
+    }
+  }
+  for (const keyword of keyWords2) {
+    if (normalized1.includes(keyword) && keyword.length > 2) {
+      return true;
+    }
+  }
+  
+  // Ưu tiên: Sử dụng service để tìm từ database
+  try {
+    const result = await medicineMetadataService.areDosageFormsEquivalent(form1, form2);
+    if (result) return true;
+  } catch (error) {
+    console.warn('⚠️ Error using medicineMetadataService for dosage form comparison, falling back to hardcode:', error);
+  }
+  
+  // Fallback: Mapping các giá trị tương đương
+  const equivalentForms: { [key: string]: string[] } = {
+    'tablet': ['viên nén', 'tablet', 'viên', 'viên nén bao phim', 'tablet film-coated'],
+    'capsule': ['nang', 'capsule', 'viên nang', 'viên con nhộng'],
+    'gel': ['gel', 'kem gel', 'emulgel', 'gel bôi', 'gelboi'],
+    'cream': ['cream', 'kem', 'kem bôi', 'kemboi'],
+    'ointment': ['ointment', 'mỡ', 'thuốc mỡ', 'thuocmo'],
+    'solution': ['dung dịch', 'solution'],
+    'syrup': ['siro', 'syrup'],
+    'injection': ['tiêm', 'injection', 'chích'],
+    'tube': ['tuýp', 'tuyp', 'tube']
+  };
+  
+  for (const [key, group] of Object.entries(equivalentForms)) {
+    if (group.some(f => normalizeMedicineValue(f) === normalized1) || normalized1.includes(key)) {
+      return group.some(f => normalizeMedicineValue(f) === normalized2) || normalized2.includes(key);
+    }
+  }
+  
+  for (const [key, group] of Object.entries(equivalentForms)) {
+    if (group.some(f => normalizeMedicineValue(f) === normalized2) || normalized2.includes(key)) {
+      return group.some(f => normalizeMedicineValue(f) === normalized1) || normalized1.includes(key);
+    }
+  }
+  
+  return false;
+}
+
+// Helper function to check if two subcategories are equivalent
+async function isSubcategoryEquivalent(sub1: string, sub2: string): Promise<boolean> {
+  const normalized1 = normalizeMedicineValue(sub1);
+  const normalized2 = normalizeMedicineValue(sub2);
+  
+  if (normalized1 === normalized2) return true;
+  
+  // Bỏ qua nếu một trong hai là "N/A" hoặc rỗng
+  if (!normalized1 || normalized1 === 'n/a' || normalized1 === 'na' || normalized1 === '') return true;
+  if (!normalized2 || normalized2 === 'n/a' || normalized2 === 'na' || normalized2 === '') return true;
+  
+  // Kiểm tra nếu một chuỗi chứa từ khóa của chuỗi kia
+  const keyWords1 = normalized1.split(/\s+/).filter(w => w.length > 2);
+  const keyWords2 = normalized2.split(/\s+/).filter(w => w.length > 2);
+  
+  for (const keyword of keyWords1) {
+    if (normalized2.includes(keyword) && keyword.length > 3) {
+      return true;
+    }
+  }
+  for (const keyword of keyWords2) {
+    if (normalized1.includes(keyword) && keyword.length > 3) {
+      return true;
+    }
+  }
+  
+  // Ưu tiên: Sử dụng service để tìm từ database
+  try {
+    const result = await medicineMetadataService.areSubcategoriesEquivalent(sub1, sub2);
+    if (result) return true;
+  } catch (error) {
+    console.warn('⚠️ Error using medicineMetadataService for subcategory comparison, falling back to hardcode:', error);
+  }
+  
+  // Fallback: Mapping các giá trị tương đương
+  const equivalentSubs: { [key: string]: string[] } = {
+    'nsaid': ['nsaid', 'nsaids', 'kháng viêm', 'anti-inflammatory', 'non-steroidal anti-inflammatory', 'nonsteroidal anti-inflammatory', 'điều trị xương khớp'],
+    'paracetamol': ['paracetamol', 'acetaminophen'],
+    'corticosteroid': ['corticosteroid', 'cortico', 'steroid']
+  };
+  
+  for (const [key, group] of Object.entries(equivalentSubs)) {
+    if (group.some(s => normalizeMedicineValue(s) === normalized1) || normalized1.includes(key)) {
+      return group.some(s => normalizeMedicineValue(s) === normalized2) || normalized2.includes(key);
+    }
+  }
+  
+  for (const [key, group] of Object.entries(equivalentSubs)) {
+    if (group.some(s => normalizeMedicineValue(s) === normalized2) || normalized2.includes(key)) {
+      return group.some(s => normalizeMedicineValue(s) === normalized1) || normalized1.includes(key);
+    }
+  }
+  
+  return false;
+}
+
+// Helper function to check if medicine matches all 4 conditions
+async function matchesAll4Conditions(
+  medicine: any,
+  targetCategory: string,
+  targetSubcategory: string,
+  targetDosageForm: string,
+  targetRoute: string
+): Promise<{ matches: boolean; matchCount: number; details: { category: boolean; subcategory: boolean; dosageForm: boolean; route: boolean } }> {
+  const hasCategory = targetCategory && medicine.category && 
+    normalizeMedicineValue(targetCategory) === normalizeMedicineValue(medicine.category);
+  
+  const hasSubcategory = await isSubcategoryEquivalent(targetSubcategory, medicine.subcategory || '');
+  const hasDosageForm = await isDosageFormEquivalent(targetDosageForm, medicine.dosageForm || '');
+  
+  const normalizedRoute1 = normalizeMedicineValue(targetRoute);
+  const normalizedRoute2 = normalizeMedicineValue(medicine.route || '');
+  
+  let hasRoute = false;
+  if (normalizedRoute1 && normalizedRoute2) {
+    if (normalizedRoute1 === normalizedRoute2) {
+      hasRoute = true;
+    } else {
+      const keyWords1 = normalizedRoute1.split(/\s+/).filter(w => w.length > 2);
+      const keyWords2 = normalizedRoute2.split(/\s+/).filter(w => w.length > 2);
+      
+      for (const keyword of keyWords1) {
+        if (normalizedRoute2.includes(keyword) && keyword.length > 2) {
+          hasRoute = true;
+          break;
+        }
+      }
+      if (!hasRoute) {
+        for (const keyword of keyWords2) {
+          if (normalizedRoute1.includes(keyword) && keyword.length > 2) {
+            hasRoute = true;
+            break;
+          }
+        }
+      }
+      
+      if (!hasRoute) {
+        const equivalentRoutes: { [key: string]: string[] } = {
+          'uống': ['uống', 'oral', 'đường uống', 'duong uong'],
+          'ngoài': ['bôi ngoài', 'dùng ngoài', 'topical', 'boi ngoai', 'dung ngoai', 'ngoài'],
+          'tiêm': ['tiêm', 'injection', 'chích', 'chich'],
+          'nhỏ': ['nhỏ mắt', 'nhỏ mũi', 'eye drops', 'nasal drops']
+        };
+        
+        for (const [key, routes] of Object.entries(equivalentRoutes)) {
+          if (routes.some(r => normalizedRoute1.includes(normalizeMedicineValue(r))) || normalizedRoute1.includes(key)) {
+            if (routes.some(r => normalizedRoute2.includes(normalizeMedicineValue(r))) || normalizedRoute2.includes(key)) {
+              hasRoute = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return {
+    matches: hasCategory && hasSubcategory && hasDosageForm && hasRoute,
+    matchCount: [hasCategory, hasSubcategory, hasDosageForm, hasRoute].filter(Boolean).length,
+    details: { category: hasCategory, subcategory: hasSubcategory, dosageForm: hasDosageForm, route: hasRoute }
+  };
+}
+
+// Function to analyze medicine with AI to get 4 conditions
+async function analyzeMedicineWithAI(medicineName: string, dosage?: string): Promise<{
+  category: string;
+  subcategory: string;
+  dosageForm: string;
+  route: string;
+  analysisText: string;
+}> {
+  let category = '';
+  let subcategory = '';
+  let dosageForm = '';
+  let route = '';
+  let analysisText = '';
+
+  try {
+    const { geminiGenerateContentText, buildGeminiCacheKey } = await import('../services/geminiRuntime.js');
+    
+    const prompt = `Bạn là chuyên gia dược học. Hãy phân tích tên thuốc sau và trả lời CHỈ bằng JSON format:
+
+Tên thuốc: "${medicineName}"
+${dosage ? `Hàm lượng: ${dosage}` : ''}
+
+Yêu cầu: Phân tích và trả lời CHỈ bằng JSON với format sau (KHÔNG có text nào khác, CHỈ JSON):
+{
+  "category": "danh mục thuốc (ví dụ: Thuốc cơ xương khớp, Giảm đau hạ sốt, Thuốc da liễu)",
+  "subcategory": "nhóm thuốc (ví dụ: NSAID, Paracetamol, Corticosteroid)",
+  "dosageForm": "dạng bào chế (ví dụ: Viên nén, Gel, Cream, Ointment, Tablet, Capsule, Tube)",
+  "route": "cách dùng (ví dụ: Uống, Dùng ngoài, Tiêm, Nhỏ mắt)",
+  "analysis": "phân tích ngắn gọn về thuốc này"
+}
+
+Lưu ý quan trọng:
+- Nếu tên thuốc có "1%/20g", "gel", "cream", "tuýp", "bôi" → route = "Dùng ngoài", dosageForm = "Gel" hoặc "Cream"
+- Nếu tên thuốc có "viên", "tablet", "capsule" → route = "Uống", dosageForm = "Tablet" hoặc "Capsule"
+- Phân tích dựa trên tên thuốc và hàm lượng để xác định chính xác 4 thông tin trên.`;
+
+    console.log(`🤖 Calling Gemini AI for medicine: "${medicineName}"${dosage ? ` (${dosage})` : ''}`);
+    // IMPORTANT:
+    // Do NOT route this through the general chat Gemini system prompt (very long).
+    // Keep it lightweight + cacheable to avoid rate-limit spikes when analyzing many medicines.
+    const cacheKey = buildGeminiCacheKey('medicine-4conds', {
+      medicineName,
+      dosage: dosage || '',
+      promptVersion: 'v1',
+    });
+    const aiResponse = await geminiGenerateContentText({
+      parts: [{ text: prompt }],
+      cacheKey,
+      cacheTtlMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxRetries: 3,
+      opName: 'analyzeMedicineWithAI',
+    });
+
+    if (aiResponse) {
+      console.log(`🤖 Gemini AI response received (${aiResponse.length} chars) for "${medicineName}"`);
+      try {
+        let jsonText = aiResponse.trim();
+        if (jsonText.startsWith('```json')) {
+          jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+        } else if (jsonText.startsWith('```')) {
+          jsonText = jsonText.replace(/```\n?/g, '');
+        }
+        
+        const parsed = JSON.parse(jsonText);
+        category = parsed.category || '';
+        subcategory = parsed.subcategory || '';
+        dosageForm = parsed.dosageForm || '';
+        route = parsed.route || '';
+        analysisText = parsed.analysis || '';
+
+        console.log(`🤖 AI Analysis for "${medicineName}":`, { category, subcategory, dosageForm, route });
+      } catch (parseError: any) {
+        console.error(`❌ Error parsing AI response for "${medicineName}":`, parseError?.message || parseError);
+        console.error(`   Raw AI response (first 200 chars):`, aiResponse.substring(0, 200));
+        // Fallback: thử extract từ text response
+        const lowerResponse = aiResponse.toLowerCase();
+        if (lowerResponse.includes('dùng ngoài') || lowerResponse.includes('bôi') || lowerResponse.includes('gel') || lowerResponse.includes('cream')) {
+          route = 'Dùng ngoài';
+          console.log(`   🔍 Fallback: Extracted route "Dùng ngoài" from AI text response`);
+        } else if (lowerResponse.includes('uống') || lowerResponse.includes('oral') || lowerResponse.includes('viên')) {
+          route = 'Uống';
+          console.log(`   🔍 Fallback: Extracted route "Uống" from AI text response`);
+        }
+      }
+    } else {
+      console.warn(`⚠️ Gemini AI returned null/undefined for "${medicineName}" - will use DB fallback`);
+    }
+  } catch (error: any) {
+    console.error(`❌ Error in AI analysis for "${medicineName}":`, error?.message || error);
+    console.error(`   Error type:`, error?.constructor?.name);
+    console.error(`   Will use DB fallback to get 4 conditions`);
+  }
+
+  return { category, subcategory, dosageForm, route, analysisText };
 }
 
 async function getContraindicationFromMedicines(
@@ -199,7 +515,8 @@ async function getContraindicationFromMedicines(
 async function formatSuggestionText(
   originalMedicineName: string,
   originalDosage: string | null,
-  suggestedMedicines: any[]
+  suggestedMedicines: any[],
+  aiAnalysis?: { category: string; subcategory: string; dosageForm: string; route: string; analysisText: string }
 ): Promise<string> {
   if (!suggestedMedicines || suggestedMedicines.length === 0) {
     return `Không tìm thấy chính xác tên thuốc "${originalMedicineName}" trong hệ thống. Vui lòng liên hệ dược sĩ để được tư vấn.`;
@@ -207,48 +524,75 @@ async function formatSuggestionText(
 
   const db = mongoose.connection.db;
   let suggestionText = `Không tìm thấy chính xác tên thuốc trong đơn.\n\n`;
+  
+  // Thêm phần AI phân tích nếu có (giống Web)
+  if (aiAnalysis && (aiAnalysis.category || aiAnalysis.subcategory || aiAnalysis.dosageForm || aiAnalysis.route)) {
+    suggestionText += `📋 Phân tích thuốc "${originalMedicineName}":\n`;
+    if (aiAnalysis.category) {
+      suggestionText += `   - Danh mục: ${aiAnalysis.category}\n`;
+    }
+    if (aiAnalysis.subcategory) {
+      suggestionText += `   - Nhóm thuốc: ${aiAnalysis.subcategory}\n`;
+    }
+    if (aiAnalysis.dosageForm) {
+      suggestionText += `   - Dạng bào chế: ${aiAnalysis.dosageForm}\n`;
+    }
+    if (aiAnalysis.route) {
+      suggestionText += `   - Cách dùng: ${aiAnalysis.route}\n`;
+    }
+    if (aiAnalysis.analysisText) {
+      suggestionText += `   - Phân tích: ${aiAnalysis.analysisText}\n`;
+    }
+    suggestionText += `\n`;
+  }
+  
+  // Format tất cả suggestions - rõ ràng, chuẩn dược, không dài dòng
+  // Tách từng thông tin: tên – công dụng – hàm lượng – lý do đề xuất
 
   if (suggestedMedicines.length === 1) {
+    // Chỉ có 1 thuốc - format đơn giản
     const med = suggestedMedicines[0];
     let groupTherapeutic = med.groupTherapeutic || '';
     let indication = med.indication || '';
+    
+    // Try to get groupTherapeutic, indication, and contraindication from medicines collection
     let contraindication = med.contraindication || '';
-    let medicineInfo: any = null;
-
+    let medicineInfo: any = null; // Declare outside if block for use in helper function
+    
     if (db) {
       try {
         const medicinesCollection = db.collection('medicines');
         const medicineName = med.productName || med.name || '';
         const searchName = medicineName.split('(')[0].trim();
-
+        
         if (searchName) {
           medicineInfo = await medicinesCollection.findOne({
             $or: [
               { name: { $regex: searchName, $options: 'i' } },
               { brand: { $regex: searchName, $options: 'i' } },
               { genericName: { $regex: searchName, $options: 'i' } },
-              { activeIngredient: { $regex: searchName, $options: 'i' } },
-            ],
+              { activeIngredient: { $regex: searchName, $options: 'i' } }
+            ]
           });
-
+          
           if (medicineInfo) {
             if (medicineInfo.groupTherapeutic && !groupTherapeutic) {
               groupTherapeutic = medicineInfo.groupTherapeutic;
             }
+            // Ưu tiên indication, nếu không có thì dùng description, uses, hoặc congDung
             if (!indication) {
-              indication =
-                medicineInfo.indication ||
-                medicineInfo.description ||
-                medicineInfo.uses ||
-                medicineInfo.congDung ||
-                '';
+              indication = medicineInfo.indication || 
+                          medicineInfo.description || 
+                          medicineInfo.uses || 
+                          medicineInfo.congDung || 
+                          '';
             }
+            // Lấy chống chỉ định nếu có
             if (!contraindication) {
-              contraindication =
-                medicineInfo.contraindication ||
-                medicineInfo.chongChiDinh ||
-                medicineInfo.contraindications ||
-                '';
+              contraindication = medicineInfo.contraindication || 
+                                medicineInfo.chongChiDinh || 
+                                medicineInfo.contraindications || 
+                                '';
             }
           }
         }
@@ -256,23 +600,230 @@ async function formatSuggestionText(
         console.error('Error fetching medicine info for suggestion:', error);
       }
     }
-
-    const dosageText = originalDosage ? ` – Hàm lượng gốc: ${originalDosage}` : '';
-    const indicationText = indication ? ` – Công dụng: ${indication}` : '';
-    const contraindicationText = contraindication ? ` – Chống chỉ định: ${contraindication}` : '';
-    const reasonText = med.matchReason ? ` – Lý do đề xuất: ${getMatchExplanation(med.matchReason, med.confidence || 0.3)}` : '';
-
-    suggestionText += `Đề xuất: ${med.productName || med.name}${dosageText}${indicationText}${contraindicationText}${reasonText}`;
+    
+    // Nếu không có chống chỉ định từ database, sử dụng helper function để lấy (có fallback)
+    if (!contraindication) {
+      const medicineName = med.productName || med.name || '';
+      contraindication = await getContraindicationFromMedicines(medicineName, groupTherapeutic, medicineInfo);
+    }
+    
+    // Lưu chống chỉ định vào med object để frontend có thể sử dụng
+    med.contraindication = contraindication;
+    
+    const suggestedName = med.productName || med.name || '';
+    const suggestedDosage = med.dosage || originalDosage || '';
+    const matchReason = med.matchExplanation || getMatchExplanation(med.matchReason || 'similar', med.confidence || 0.6);
+    
+    // Format: tên – công dụng – hàm lượng – lý do (ngắn gọn, rõ ràng)
+    suggestionText += `Dựa trên hoạt chất và công dụng điều trị, hệ thống đề xuất ${suggestedName}`;
+    if (suggestedDosage) {
+      suggestionText += ` (${suggestedDosage})`;
+    }
+    suggestionText += `.`;
+    
+    if (indication) {
+      // Hiển thị công dụng đầy đủ, không cắt quá ngắn để người mua dễ biết
+      const fullIndication = indication.trim();
+      suggestionText += `\nCông dụng: ${fullIndication}`;
+    } else {
+      // Nếu không có indication, hiển thị công dụng mặc định dựa trên nhóm
+      if (groupTherapeutic) {
+        if (groupTherapeutic.toLowerCase().includes('nsaid') || groupTherapeutic.toLowerCase().includes('kháng viêm')) {
+          suggestionText += `\nCông dụng: Giảm đau, kháng viêm`;
+        } else if (groupTherapeutic.toLowerCase().includes('kháng sinh')) {
+          suggestionText += `\nCông dụng: Điều trị nhiễm khuẩn`;
+        } else {
+          suggestionText += `\nCông dụng: Điều trị theo chỉ định của bác sĩ`;
+        }
+      }
+    }
+    
+    if (groupTherapeutic) {
+      suggestionText += `\nNhóm: ${groupTherapeutic}`;
+    }
+    
+    if (suggestedDosage) {
+      suggestionText += `\nHàm lượng ${suggestedDosage} tương ứng với liều điều trị tiêu chuẩn.`;
+    }
+    
+    suggestionText += `\nLý do đề xuất: ${matchReason}`;
+    
+    // Thêm chống chỉ định nếu có
+    if (contraindication && contraindication.trim()) {
+      suggestionText += `\n\n⚠️ Chống chỉ định: ${contraindication.trim()}`;
+    }
   } else {
-    suggestionText += suggestedMedicines
-      .map((med: any, idx: number) => {
-        const reason = med.matchReason ? getMatchExplanation(med.matchReason, med.confidence || 0.3) : 'Thuốc tương tự';
-        return `${idx + 1}. ${med.productName || med.name || 'Thuốc'} – Lý do: ${reason}`;
-      })
-      .join('\n');
+    // Có nhiều thuốc - format danh sách ngắn gọn
+    suggestionText += `Dựa trên hoạt chất và công dụng điều trị, hệ thống đề xuất ${suggestedMedicines.length} thuốc:\n\n`;
+    
+    for (let i = 0; i < suggestedMedicines.length; i++) {
+      const med = suggestedMedicines[i];
+      let groupTherapeutic = med.groupTherapeutic || '';
+      let indication = med.indication || '';
+      
+      // Try to get groupTherapeutic, indication, and contraindication from medicines collection
+      // Ưu tiên lấy từ med object trước (đã được lấy từ similarMedicines)
+      let contraindication = med.contraindication || '';
+      let medicineInfo: any = null; // Declare outside if block for use in helper function
+      
+      if (db) {
+        try {
+          const medicinesCollection = db.collection('medicines');
+          const medicineName = med.productName || med.name || '';
+          const searchName = medicineName.split('(')[0].trim();
+          
+          if (searchName) {
+            medicineInfo = await medicinesCollection.findOne({
+              $or: [
+                { name: { $regex: searchName, $options: 'i' } },
+                { brand: { $regex: searchName, $options: 'i' } },
+                { genericName: { $regex: searchName, $options: 'i' } },
+                { activeIngredient: { $regex: searchName, $options: 'i' } }
+              ]
+            });
+            
+            if (medicineInfo) {
+              if (medicineInfo.groupTherapeutic && !groupTherapeutic) {
+                groupTherapeutic = medicineInfo.groupTherapeutic;
+              }
+              // Ưu tiên indication, nếu không có thì dùng description, uses, hoặc congDung
+              if (!indication) {
+                indication = medicineInfo.indication || 
+                            medicineInfo.description || 
+                            medicineInfo.uses || 
+                            medicineInfo.congDung || 
+                            '';
+              }
+              // Lấy chống chỉ định nếu có và chưa có trong med object
+              if (!contraindication) {
+                contraindication = medicineInfo.contraindication || 
+                                  medicineInfo.chongChiDinh || 
+                                  medicineInfo.contraindications || 
+                                  '';
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching medicine info for suggestion:', error);
+        }
+      }
+      
+      // Nếu không có chống chỉ định từ database, sử dụng helper function để lấy (có fallback)
+      if (!contraindication) {
+        const medicineName = med.productName || med.name || '';
+        const finalGroupTherapeutic = groupTherapeutic || med.groupTherapeutic || '';
+        contraindication = await getContraindicationFromMedicines(medicineName, finalGroupTherapeutic, medicineInfo);
+      }
+      
+      // Lưu chống chỉ định vào med object để frontend có thể sử dụng
+      med.contraindication = contraindication;
+      
+      const suggestedName = med.productName || med.name || '';
+      const suggestedDosage = med.dosage || originalDosage || '';
+      const matchReason = med.matchExplanation || getMatchExplanation(med.matchReason || 'similar', med.confidence || 0.6);
+      
+      // Format: tên – công dụng – hàm lượng – lý do (ngắn gọn, rõ ràng)
+      suggestionText += `${i + 1}. ${suggestedName}`;
+      if (suggestedDosage) {
+        suggestionText += ` (${suggestedDosage})`;
+      }
+      suggestionText += `\n`;
+      
+      if (indication) {
+        // Hiển thị công dụng đầy đủ để người mua dễ biết, không cắt quá ngắn
+        const fullIndication = indication.trim();
+        suggestionText += `   Công dụng: ${fullIndication}\n`;
+      } else {
+        // Nếu không có indication, hiển thị công dụng mặc định dựa trên nhóm
+        if (groupTherapeutic) {
+          if (groupTherapeutic.toLowerCase().includes('nsaid') || groupTherapeutic.toLowerCase().includes('kháng viêm')) {
+            suggestionText += `   Công dụng: Giảm đau, kháng viêm\n`;
+          } else if (groupTherapeutic.toLowerCase().includes('kháng sinh')) {
+            suggestionText += `   Công dụng: Điều trị nhiễm khuẩn\n`;
+          } else {
+            suggestionText += `   Công dụng: Điều trị theo chỉ định của bác sĩ\n`;
+          }
+        }
+      }
+      
+      if (groupTherapeutic) {
+        suggestionText += `   Nhóm: ${groupTherapeutic}\n`;
+      }
+      
+      suggestionText += `   Lý do: ${matchReason}`;
+      
+      // Thêm chống chỉ định nếu có
+      if (contraindication && contraindication.trim()) {
+        suggestionText += `\n   ⚠️ Chống chỉ định: ${contraindication.trim()}`;
+      }
+      
+      suggestionText += `\n\n`;
+    }
   }
-
+  
   return suggestionText.trim();
+}
+
+// Helper function to get description from medicines collection if product doesn't have it
+async function getProductDescription(product: any): Promise<string> {
+  // If product already has a valid description (not empty and not just dosage), return it
+  if (product.description && 
+      product.description.trim().length > 0 && 
+      !/^\s*\d+(?:\.\d+)?\s*(?:mg|g|ml|l|mcg|iu|ui|%)(?:\s*[+\/]\s*\d+(?:\.\d+)?\s*(?:mg|g|ml|l|mcg|iu|ui|%)?)?\s*$/i.test(product.description.trim())) {
+    return product.description;
+  }
+  
+  // Try to get description from medicines collection
+  try {
+    const db = mongoose.connection.db;
+    if (!db) return product.description || product.strength || '';
+    
+    const medicinesCollection = db.collection('medicines');
+    const productName = product.name || '';
+    
+    // Try exact match first
+    let medicine = await medicinesCollection.findOne({ name: productName });
+    
+    // If not found, try case-insensitive regex
+    if (!medicine) {
+      const escapedName = productName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      medicine = await medicinesCollection.findOne({
+        name: { $regex: `^${escapedName}$`, $options: 'i' }
+      });
+    }
+    
+    // If still not found, try normalized name (remove spaces, underscores, etc.)
+    if (!medicine) {
+      const normalizedName = productName.replace(/[\s_+\-]/g, '').toLowerCase();
+      const allMedicines = await medicinesCollection.find({}).toArray();
+      const foundMedicine = allMedicines.find(med => {
+        const medName = (med.name || '').replace(/[\s_+\-]/g, '').toLowerCase();
+        return medName === normalizedName;
+      });
+      medicine = foundMedicine || null;
+    }
+    
+    if (medicine) {
+      // Priority: description > indication > genericName > strength
+      const description = medicine.description || 
+                         medicine.indication || 
+                         medicine.genericName || 
+                         medicine.strength || 
+                         '';
+      
+      // Only return if it's not just dosage
+      if (description && 
+          description.trim().length > 0 && 
+          !/^\s*\d+(?:\.\d+)?\s*(?:mg|g|ml|l|mcg|iu|ui|%)(?:\s*[+\/]\s*\d+(?:\.\d+)?\s*(?:mg|g|ml|l|mcg|iu|ui|%)?)?\s*$/i.test(description.trim())) {
+        return description.trim();
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching description from medicines collection:', error);
+  }
+  
+  // Fallback to product's description or strength
+  return product.description || product.strength || '';
 }
 
 function isSameDosage(d1: string | null | undefined, d2: string | null | undefined): boolean {
@@ -309,92 +860,9 @@ async function fetchMedicineInfo(medicineName: string) {
   }
 }
 
-async function enrichAnalysisResult(analysisResult: any) {
-  if (!analysisResult) return analysisResult;
-
-  const foundMedicines = Array.isArray(analysisResult.foundMedicines)
-    ? analysisResult.foundMedicines
-    : [];
-  const notFoundMedicines = Array.isArray(analysisResult.notFoundMedicines)
-    ? analysisResult.notFoundMedicines
-    : [];
-
-  // Enrich found medicines with explanation + contraindication
-  const enrichedFound = await Promise.all(
-    foundMedicines.map(async (med: any) => {
-      const name = med.productName || med.name || med.originalText || '';
-      let contraindication = med.contraindication || '';
-      if (!contraindication) {
-        try {
-          contraindication = await getContraindicationFromMedicines(
-            name,
-            med.groupTherapeutic,
-            med.medicineInfo
-          );
-        } catch (err) {
-          console.error('Error getting contraindication for found medicine:', err);
-        }
-      }
-      return {
-        ...med,
-        matchExplanation: getMatchExplanation(med.matchReason, med.confidence || 0.3),
-        contraindication: contraindication || undefined,
-      };
-    })
-  );
-
-  // Enrich notFound suggestions + suggestion text
-  const enrichedNotFound = await Promise.all(
-    notFoundMedicines.map(async (item: any) => {
-      const suggestions = Array.isArray(item.suggestions) ? item.suggestions : [];
-      const enrichedSuggestions = await Promise.all(
-        suggestions.map(async (s: any) => {
-          const name = s.productName || s.name || s.originalText || '';
-          let contraindication = s.contraindication || '';
-          if (!contraindication) {
-            try {
-              contraindication = await getContraindicationFromMedicines(
-                name,
-                s.groupTherapeutic,
-                s.medicineInfo
-              );
-            } catch (err) {
-              console.error('Error getting contraindication for suggestion:', err);
-            }
-          }
-          return {
-            ...s,
-            matchExplanation: getMatchExplanation(s.matchReason, s.confidence || 0.3),
-            contraindication: contraindication || undefined,
-          };
-        })
-      );
-
-      let suggestionText: string | undefined = undefined;
-      try {
-        suggestionText = await formatSuggestionText(
-          item.originalText || 'Thuốc',
-          null,
-          enrichedSuggestions
-        );
-      } catch (err) {
-        console.error('Error formatting suggestion text:', err);
-      }
-
-      return {
-        ...item,
-        suggestions: enrichedSuggestions,
-        suggestionText,
-      };
-    })
-  );
-
-  return {
-    ...analysisResult,
-    foundMedicines: enrichedFound,
-    notFoundMedicines: enrichedNotFound,
-  };
-}
+// Hàm enrichAnalysisResult đã được bỏ - trả về suggestions trực tiếp từ performAIAnalysis
+// Suggestions đã có đầy đủ thông tin (category, subcategory, dosageForm, route, contraindication, etc.)
+// ngay từ khi được tạo trong performAIAnalysis, giống như web backend
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -449,6 +917,25 @@ export const scanPrescription = async (req: Request, res: Response) => {
 
     const imagePath = req.file.path;
 
+    // Upload to Supabase Storage (if configured)
+    let supabaseImageUrl = imagePath; // Fallback to local path
+    try {
+      const supabaseResult = await uploadToSupabase(
+        STORAGE_BUCKETS.PRESCRIPTIONS,
+        imagePath,
+        `prescription-${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(req.file.originalname)}`,
+        {
+          contentType: req.file.mimetype,
+        }
+      );
+      if (supabaseResult) {
+        supabaseImageUrl = supabaseResult.url;
+        console.log('✅ Prescription image uploaded to Supabase:', supabaseImageUrl);
+      }
+    } catch (supabaseError: any) {
+      console.warn('⚠️ Supabase upload failed, using local path:', supabaseError.message);
+    }
+
     // Use OCR service to extract info from image
     const extractedInfo = await processPrescriptionImage(imagePath);
 
@@ -478,7 +965,7 @@ export const scanPrescription = async (req: Request, res: Response) => {
       phoneNumber: phoneNumberValue,
       doctorName: extractedInfo.doctorName || 'Không xác định',
       hospitalName: extractedInfo.hospitalName || 'Không xác định',
-      prescriptionImage: imagePath,
+      prescriptionImage: supabaseImageUrl, // Use Supabase URL if available, otherwise local path
       status: 'pending',
       notes: extractedInfo.notes || '',
       diagnosis: extractedInfo.diagnosis,
@@ -580,12 +1067,15 @@ export const createPrescriptionOrder = async (req: Request, res: Response) => {
       });
     }
 
+    // Upload to Supabase Storage (if configured)
+    const imageUrl = await uploadPrescriptionImageToSupabase(req.file.path, req.file.originalname);
+
     // Create prescription record
     const prescription = new Prescription({
       userId,
       doctorName: doctorName || 'Không xác định',
       hospitalName: hospitalName || 'Không xác định',
-      prescriptionImage: req.file.path,
+      prescriptionImage: imageUrl,
       status: 'pending',
       notes: notes || '',
     });
@@ -671,6 +1161,9 @@ export const savePrescription = async (req: Request, res: Response) => {
       }
     }
 
+    // Upload to Supabase Storage (if configured)
+    const imageUrl = await uploadPrescriptionImageToSupabase(req.file.path, req.file.originalname);
+
     // Create prescription record for saving
     const prescription = new Prescription({
       userId,
@@ -678,7 +1171,7 @@ export const savePrescription = async (req: Request, res: Response) => {
       phoneNumber: phoneNumberValue,
       doctorName: doctorName || 'Không xác định',
       hospitalName: hospitalName || 'Không xác định',
-      prescriptionImage: req.file.path,
+      prescriptionImage: imageUrl,
       status: 'saved', // Different status for saved prescriptions
       notes: notes || '',
       suggestedMedicines: parsedSuggestedMedicines.length > 0 ? parsedSuggestedMedicines : undefined,
@@ -981,6 +1474,24 @@ export const analyzePrescription = async (req: Request, res: Response) => {
       imagePath = prescriptionImageFile.path;
       console.log('Using uploaded file for analysis:', imagePath);
       
+      // Upload to Supabase Storage (if configured) - will be saved after analysis if needed
+      try {
+        const supabaseResult = await uploadToSupabase(
+          STORAGE_BUCKETS.PRESCRIPTIONS,
+          imagePath,
+          `prescription-${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(prescriptionImageFile.originalname)}`,
+          {
+            contentType: prescriptionImageFile.mimetype,
+          }
+        );
+        if (supabaseResult) {
+          imagePath = supabaseResult.url; // Use Supabase URL for saving
+          console.log('✅ Prescription image uploaded to Supabase for analysis:', imagePath);
+        }
+      } catch (supabaseError: any) {
+        console.warn('⚠️ Supabase upload failed, using local path:', supabaseError.message);
+      }
+      
       // Optionally save prescription after analysis if prescriptionId is not provided
       shouldSavePrescription = !prescriptionId;
     } else if (prescriptionId && userId) {
@@ -1042,16 +1553,26 @@ export const analyzePrescription = async (req: Request, res: Response) => {
       // Use the saved prescription image path from database (if it still exists)
       if (prescription.prescriptionImage) {
         imagePath = prescription.prescriptionImage;
-        const fileExists = fs.existsSync(imagePath);
-        console.log('Using image from database:', { imagePath, fileExists });
-        if (!fileExists) {
-          console.warn('Prescription image path not found on disk. Prompting re-upload.');
-          // If no OCR text and file is missing, return a clear error instead of 500
-          if (!prescriptionText && !imageUrlFromBody && !prescriptionImageFile) {
-            return res.status(400).json({
-              success: false,
-              message: 'Ảnh đơn thuốc không còn tồn tại trên máy chủ. Vui lòng chụp/ tải lại ảnh để phân tích.',
-            });
+        
+        // Check if imagePath is a URL (Supabase or external) or local file path
+        const isUrl = imagePath.startsWith('http://') || imagePath.startsWith('https://');
+        
+        if (isUrl) {
+          // It's a URL (Supabase or external), no need to check file existence
+          console.log('Using image URL from database (Supabase/external):', imagePath);
+        } else {
+          // It's a local file path, check if it exists
+          const fileExists = fs.existsSync(imagePath);
+          console.log('Using image from database (local path):', { imagePath, fileExists });
+          if (!fileExists) {
+            console.warn('Prescription image path not found on disk. Prompting re-upload.');
+            // If no OCR text and file is missing, return a clear error instead of 500
+            if (!prescriptionText && !imageUrlFromBody && !prescriptionImageFile) {
+              return res.status(400).json({
+                success: false,
+                message: 'Ảnh đơn thuốc không còn tồn tại trên máy chủ. Vui lòng chụp/ tải lại ảnh để phân tích.',
+              });
+            }
           }
         }
       }
@@ -1094,18 +1615,7 @@ export const analyzePrescription = async (req: Request, res: Response) => {
     let analysisResult;
     try {
       analysisResult = await performAIAnalysis(prescriptionText, imagePath);
-      
-      // Enrich analysis result separately to avoid crashing if enrichment fails
-      try {
-        analysisResult = await enrichAnalysisResult(analysisResult);
-      } catch (enrichError: any) {
-        console.warn('⚠️ Error enriching analysis result (continuing with basic result):', {
-          message: enrichError?.message,
-          name: enrichError?.name,
-        });
-        // Continue with basic analysis result if enrichment fails
-        // This ensures the request still succeeds even if Gemini API fails
-      }
+      // Trả về trực tiếp như web, không enrich nữa vì suggestions đã có đầy đủ thông tin
     } catch (aiError: any) {
       console.error('performAIAnalysis error:', {
         message: aiError?.message,
@@ -1199,34 +1709,7 @@ export const analyzePrescription = async (req: Request, res: Response) => {
           prescription.notes = `${prescription.notes}\n[AI Analysis] Tìm thấy: ${medicinesList}`.trim();
         }
         
-        // Save suggested medicines from notFoundMedicines
-        if (analysisResult.notFoundMedicines && analysisResult.notFoundMedicines.length > 0) {
-          const allSuggestions: any[] = [];
-          analysisResult.notFoundMedicines.forEach((notFound: any) => {
-            if (notFound.suggestions && Array.isArray(notFound.suggestions)) {
-              notFound.suggestions.forEach((suggestion: any) => {
-                // Avoid duplicates by checking productId
-                if (!allSuggestions.find(s => s.productId === String(suggestion.productId))) {
-                  allSuggestions.push({
-                    productId: String(suggestion.productId),
-                    productName: suggestion.productName,
-                    price: suggestion.price,
-                    unit: suggestion.unit,
-                    confidence: suggestion.confidence,
-                    matchReason: suggestion.matchReason,
-                    originalText: notFound.originalText,
-                  });
-                }
-              });
-            }
-          });
-          
-          if (allSuggestions.length > 0) {
-            prescription.suggestedMedicines = allSuggestions;
-            console.log(`Saved ${allSuggestions.length} suggested medicines to prescription`);
-          }
-        }
-        
+        // Note: suggestedMedicines are only returned in response, not saved to database
         await prescription.save();
       } catch (saveError: any) {
         console.warn('⚠️ Error saving analysis result to prescription (continuing with response):', {
@@ -1462,12 +1945,45 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
     try {
       console.log('🔍 Starting OCR analysis for image:', prescriptionImage);
       
-      // Check if file exists
-      if (fs.existsSync(prescriptionImage)) {
+      // If imagePath is a URL (Supabase or external), download it first
+      let imagePathForOCR = prescriptionImage;
+      if (prescriptionImage.startsWith('http://') || prescriptionImage.startsWith('https://')) {
+        console.log('📥 Downloading image from URL for OCR processing...');
+        try {
+          const axios = (await import('axios')).default;
+          const response = await axios.get(prescriptionImage, { responseType: 'arraybuffer' });
+          const tempDir = path.join(process.cwd(), 'uploads', 'temp');
+          if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+          }
+          const extension = prescriptionImage.includes('.png') ? 'png' : 'jpg';
+          const tempFileName = `temp_prescription_${Date.now()}.${extension}`;
+          imagePathForOCR = path.join(tempDir, tempFileName);
+          fs.writeFileSync(imagePathForOCR, Buffer.from(response.data));
+          console.log('✅ Image downloaded to:', imagePathForOCR);
+        } catch (downloadError: any) {
+          console.error('❌ Error downloading image from URL:', downloadError.message);
+          throw new Error('Không thể tải ảnh từ URL để phân tích. Vui lòng thử lại.');
+        }
+      }
+      
+      // Check if file exists (for local paths) or use downloaded path
+      const fileExists = fs.existsSync(imagePathForOCR);
+      if (fileExists) {
         // Use processPrescriptionImage to get OCR + Gemini correction + extract info
         // This will automatically use Gemini if available
-        extractedInfo = await processPrescriptionImage(prescriptionImage);
+        extractedInfo = await processPrescriptionImage(imagePathForOCR);
         prescriptionText = extractedInfo.rawText;
+        
+        // Clean up temp file if downloaded from URL
+        if (imagePathForOCR !== prescriptionImage && imagePathForOCR.includes('temp_prescription_')) {
+          try {
+            fs.unlinkSync(imagePathForOCR);
+            console.log('✅ Cleaned up temp downloaded image');
+          } catch (cleanupError) {
+            console.warn('⚠️ Error cleaning up temp file:', cleanupError);
+          }
+        }
         
         // Only add note if OCR was successful - no need for technical details
         console.log('✅ OCR completed. Extracted text length:', prescriptionText.length);
@@ -1943,64 +2459,1289 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
             result.notes.push(`⚠️ Một số thuốc sắp hết hàng`);
           }
         } else {
-          // Step 4: Find similar medicines for suggestions (increased from 3 to 5)
-          // Always ensure we have suggestions - the function will try multiple strategies
-          const similarInput = searchTerms[0] || cleanMedicineText;
-          console.log(`🔍 Searching for similar medicines for: "${similarInput}" (original: "${medicineText}")`);
-          const similarMedicines = await findSimilarMedicines(similarInput, medicineText, 5);
-          console.log(`📊 Found ${similarMedicines.length} similar medicines for "${cleanMedicineText}"`);
+          // Step 4: Use AI to analyze medicine and get 4 conditions (category, subcategory, dosageForm, route)
+          console.log(`🤖 Using AI to analyze medicine: "${cleanMedicineText}"`);
+          const originalParsed = parseMedicineName(cleanMedicineText);
+          const extractedDosage = originalParsed.dosage;
+          const aiAnalysis = await analyzeMedicineWithAI(cleanMedicineText, extractedDosage || undefined);
+          console.log(`🤖 AI Analysis Result:`, aiAnalysis);
           
-          // Always create suggestions array - findSimilarMedicines now guarantees at least some results
-          const suggestions = await Promise.all(
-            similarMedicines.map(async (p: any) => {
-              const suggestionName = p.name || '';
-              const suggestionInfo = await fetchMedicineInfo(suggestionName);
-              const activeIngredient =
-                p.activeIngredient || suggestionInfo?.activeIngredient || suggestionInfo?.genericName;
-              const groupTherapeutic = p.groupTherapeutic || suggestionInfo?.groupTherapeutic;
-              const contraindication =
-                p.contraindication ||
-                suggestionInfo?.contraindication ||
-                suggestionInfo?.chongChiDinh ||
-                suggestionInfo?.contraindications;
-
-              const originalParsed = parseMedicineName(cleanMedicineText);
-              const suggestionParsed = parseMedicineName(suggestionName);
-              const sameDosage = isSameDosage(originalParsed.dosage, suggestionParsed.dosage);
-
-              let matchReason = p.matchReason || 'similar';
-              if (sameDosage && matchReason === 'similar') {
-                matchReason = 'same_name_same_dosage';
-              } else if (
-                !sameDosage &&
-                matchReason === 'similar' &&
-                (originalParsed.dosage || suggestionParsed.dosage)
-              ) {
-                matchReason = 'same_name_different_dosage';
+          // Extract 4 conditions from AI analysis (like Web - ưu tiên AI, sau đó sẽ bổ sung từ DB nếu thiếu)
+          let targetCategory = aiAnalysis.category || '';
+          let targetSubcategory = aiAnalysis.subcategory || '';
+          let targetDosageForm = aiAnalysis.dosageForm || '';
+          let targetRoute = aiAnalysis.route || '';
+          
+          // Parse route và dosageForm từ prescription text nếu AI không có (like Web)
+          // QUAN TRỌNG: Sử dụng toàn bộ text (medicineText, cleanedText, medicineNameOnly) để có đầy đủ thông tin
+          // Không chỉ dùng cleanMedicineText vì có thể đã bị clean quá nhiều, mất mất thông tin quan trọng
+          const originalTextLower = (medicineNameOnly || medicineText || cleanedText || cleanMedicineText || '').toLowerCase();
+          const isTopicalOriginal = /%\/\s*g|\bgel\b|\bemulgel\b|\bcream\b|\bkem\b|\bthuốc\s*bôi\b|\bthuoc\s*boi\b|\btuýp\b|\btuyp\b|\bointment\b|\bmỡ\b|\bmo\b/i.test(originalTextLower);
+          // Sử dụng toàn bộ text để parse route và dosageForm (like Web)
+          const fullTextForRoute = ((medicineText || '') + ' ' + (cleanedText || '') + ' ' + (medicineNameOnly || '') + ' ' + (cleanMedicineText || '')).toLowerCase();
+          const fullTextForDosageForm = ((medicineText || '') + ' ' + (cleanedText || '') + ' ' + (medicineNameOnly || '') + ' ' + (cleanMedicineText || '')).toLowerCase();
+          
+          // Parse route từ prescription text nếu AI không có
+          if (!targetRoute) {
+            if (/dùng\s+ngoài|dung\s+ngoai|topical/i.test(fullTextForRoute) || isTopicalOriginal) {
+              targetRoute = 'Dùng ngoài';
+              console.log(`   🔍 Parsed route from prescription text: "Dùng ngoài"`);
+            } else if (/uống|uong|oral/i.test(fullTextForRoute)) {
+              targetRoute = 'Uống';
+              console.log(`   🔍 Parsed route from prescription text: "Uống"`);
+            }
+          }
+          
+          // Parse dosageForm từ prescription text nếu AI không có
+          if (!targetDosageForm) {
+            if (/gel|emulgel/i.test(fullTextForDosageForm)) {
+              targetDosageForm = 'Gel';
+              console.log(`   🔍 Parsed dosageForm from prescription text: "Gel"`);
+            } else if (/cream|kem/i.test(fullTextForDosageForm)) {
+              targetDosageForm = 'Cream';
+              console.log(`   🔍 Parsed dosageForm from prescription text: "Cream"`);
+            } else if (/ointment|mỡ|mo/i.test(fullTextForDosageForm)) {
+              targetDosageForm = 'Ointment';
+              console.log(`   🔍 Parsed dosageForm from prescription text: "Ointment"`);
+            } else if (/tuýp|tuyp|tube/i.test(fullTextForDosageForm)) {
+              if (isTopicalOriginal || targetRoute === 'Dùng ngoài') {
+                targetDosageForm = 'Gel';
+              } else {
+                targetDosageForm = 'Tube';
+              }
+              console.log(`   🔍 Parsed dosageForm from prescription text: "${targetDosageForm}"`);
+            } else if (/viên|vien|tablet/i.test(fullTextForDosageForm)) {
+              targetDosageForm = 'Tablet';
+              console.log(`   🔍 Parsed dosageForm from prescription text: "Tablet"`);
+            } else if (/capsule|nang/i.test(fullTextForDosageForm)) {
+              targetDosageForm = 'Capsule';
+              console.log(`   🔍 Parsed dosageForm from prescription text: "Capsule"`);
+            }
+          }
+          
+          // Nếu vẫn chưa có route/dosageForm và có dấu hiệu dạng bôi, set mặc định
+          if (!targetRoute && isTopicalOriginal) {
+            targetRoute = 'Dùng ngoài';
+            console.log(`   🔍 Set route to "Dùng ngoài" based on topical indicators`);
+          }
+          if (!targetDosageForm && isTopicalOriginal) {
+            targetDosageForm = 'Gel';
+            console.log(`   🔍 Set dosageForm to "Gel" based on topical indicators`);
+          }
+          
+          const hasAll4TargetConditions = !!(targetCategory && targetSubcategory && targetDosageForm && targetRoute);
+          
+          if (!hasAll4TargetConditions) {
+            console.log(`⚠️  THIẾU 4 ĐIỀU KIỆN BẮT BUỘC - Không thể đề xuất thuốc`);
+            console.log(`   Category: ${targetCategory || 'N/A'}`);
+            console.log(`   Subcategory: ${targetSubcategory || 'N/A'}`);
+            console.log(`   DosageForm: ${targetDosageForm || 'N/A'}`);
+            console.log(`   Route: ${targetRoute || 'N/A'}`);
+            // Vẫn tạo suggestions nhưng sẽ filter sau
+          } else {
+            console.log(`✅ ĐỦ 4 ĐIỀU KIỆN - Sẽ chỉ đề xuất thuốc khớp CẢ 4 điều kiện`);
+            console.log(`   Category: ${targetCategory}`);
+            console.log(`   Subcategory: ${targetSubcategory}`);
+            console.log(`   DosageForm: ${targetDosageForm}`);
+            console.log(`   Route: ${targetRoute}`);
+          }
+          
+          // Find medicines from medicines collection based on 4 conditions (like Web)
+          let similarMedicines: any[] = [];
+          let suggestions: any[] = [];
+          
+          // LUÔN tìm targetMedicine từ DB để bổ sung 4 điều kiện nếu AI thiếu (like Web)
+          console.log(`🔍 Searching medicines collection by indication/groupTherapeutic/activeIngredient...`);
+          const db = mongoose.connection.db;
+          if (db) {
+            const medicinesCollection = db.collection('medicines');
+            
+            // Step 1: Find targetMedicine to get activeIngredient and other info (ALWAYS, not just when hasAll4TargetConditions)
+            let targetMedicine: any = null;
+            let targetGroupTherapeutic = '';
+            let targetActiveIngredient = '';
+            let activeIngredientToSearch = '';
+            let targetIndication = '';
+            
+            // Parse medicine name to get genericName
+            const parsedName = parseMedicineName(cleanMedicineText);
+            const genericName = parsedName.baseName;
+            
+            // Try to find targetMedicine in medicines collection
+            const searchTermsForTarget = [
+              genericName,
+              cleanMedicineText,
+              ...(cleanMedicineText ? cleanMedicineText.split(/\s+/).filter(w => w.length > 3) : [])
+            ].filter(Boolean);
+            
+            for (const searchTerm of searchTermsForTarget) {
+              if (searchTerm && searchTerm.length > 2) {
+                const escapedSearchTerm = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                targetMedicine = await medicinesCollection.findOne({
+                  $or: [
+                    { name: { $regex: `^${escapedSearchTerm}`, $options: 'i' } },
+                    { genericName: { $regex: `^${escapedSearchTerm}`, $options: 'i' } },
+                    { name: { $regex: escapedSearchTerm, $options: 'i' } },
+                    { genericName: { $regex: escapedSearchTerm, $options: 'i' } },
+                    { activeIngredient: { $regex: escapedSearchTerm, $options: 'i' } }
+                  ]
+                });
+                
+                if (targetMedicine) {
+                  // Kiểm tra xem targetMedicine có đúng không (tên phải chứa searchTerm)
+                  const targetNameLower = (targetMedicine.name || '').toLowerCase();
+                  const targetGenericNameLower = (targetMedicine.genericName || '').toLowerCase();
+                  const searchTermLower = searchTerm.toLowerCase();
+                  
+                  // Chỉ dùng targetMedicine nếu tên hoặc genericName chứa searchTerm (tránh match sai)
+                  const isCorrectMatch = targetNameLower.includes(searchTermLower) || 
+                                        targetGenericNameLower.includes(searchTermLower) ||
+                                        (targetMedicine.activeIngredient || '').toLowerCase().includes(searchTermLower);
+                  
+                  if (isCorrectMatch) {
+                    // CHỈ dùng dữ liệu từ medicines collection nếu AI chưa có hoặc không đầy đủ
+                    // ƯU TIÊN: Dữ liệu từ AI analysis (đã được set ở trên)
+                    if (!targetGroupTherapeutic) {
+                      targetGroupTherapeutic = targetMedicine.groupTherapeutic || '';
+                    }
+                    if (!targetIndication) {
+                      targetIndication = targetMedicine.indication || targetMedicine.description || targetMedicine.uses || targetMedicine.congDung || '';
+                    }
+                    if (!targetActiveIngredient) {
+                      targetActiveIngredient = targetMedicine.activeIngredient || '';
+                    }
+                    // QUAN TRỌNG: Lấy 4 điều kiện từ medicines collection nếu AI chưa có (like Web)
+                    if (!targetSubcategory && targetMedicine.subcategory) {
+                      targetSubcategory = targetMedicine.subcategory;
+                      console.log(`   ✅ Using subcategory from DB: "${targetSubcategory}"`);
+                    }
+                    if (!targetCategory && targetMedicine.category) {
+                      targetCategory = targetMedicine.category;
+                      console.log(`   ✅ Using category from DB: "${targetCategory}"`);
+                    }
+                    if (!targetDosageForm && targetMedicine.dosageForm) {
+                      targetDosageForm = targetMedicine.dosageForm;
+                      console.log(`   ✅ Using dosageForm from DB: "${targetDosageForm}"`);
+                    }
+                    if (!targetRoute && targetMedicine.route) {
+                      targetRoute = targetMedicine.route;
+                      console.log(`   ✅ Using route from DB: "${targetRoute}"`);
+                    }
+                    if (targetMedicine.activeIngredient) {
+                      activeIngredientToSearch = targetMedicine.activeIngredient.toLowerCase();
+                    } else if (genericName && genericName.length > 3) {
+                      activeIngredientToSearch = genericName.toLowerCase();
+                    }
+                    // FALLBACK: Infer subcategory từ category, groupTherapeutic, hoặc medicine name nếu vẫn chưa có
+                    if (!targetSubcategory) {
+                      // Infer từ groupTherapeutic
+                      if (targetGroupTherapeutic) {
+                        const groupLower = targetGroupTherapeutic.toLowerCase();
+                        if (groupLower.includes('corticosteroid') || groupLower.includes('cortico') || groupLower.includes('steroid')) {
+                          targetSubcategory = 'Corticosteroid';
+                          console.log(`   🔍 Inferred subcategory from groupTherapeutic: "Corticosteroid"`);
+                        } else if (groupLower.includes('nsaid') || groupLower.includes('anti-inflammatory') || groupLower.includes('kháng viêm')) {
+                          targetSubcategory = 'NSAID';
+                          console.log(`   🔍 Inferred subcategory from groupTherapeutic: "NSAID"`);
+                        } else if (groupLower.includes('paracetamol') || groupLower.includes('acetaminophen')) {
+                          targetSubcategory = 'Paracetamol';
+                          console.log(`   🔍 Inferred subcategory from groupTherapeutic: "Paracetamol"`);
+                        }
+                      }
+                      
+                      // Infer từ category nếu vẫn chưa có
+                      if (!targetSubcategory && targetCategory) {
+                        const categoryLower = targetCategory.toLowerCase();
+                        if (categoryLower.includes('nội tiết') || categoryLower.includes('hormone')) {
+                          // Có thể là Corticosteroid nếu tên thuốc có dấu hiệu
+                          const medicineNameLower = (targetMedicine.name || '').toLowerCase();
+                          if (medicineNameLower.includes('prednisolon') || medicineNameLower.includes('prednisone') || 
+                              medicineNameLower.includes('dexamethason') || medicineNameLower.includes('hydrocortison')) {
+                            targetSubcategory = 'Corticosteroid';
+                            console.log(`   🔍 Inferred subcategory from category + medicine name: "Corticosteroid"`);
+                          }
+                        } else if (categoryLower.includes('cơ xương khớp') || categoryLower.includes('giảm đau')) {
+                          // Có thể là NSAID
+                          const medicineNameLower = (targetMedicine.name || '').toLowerCase();
+                          if (medicineNameLower.includes('diclofenac') || medicineNameLower.includes('ibuprofen') || 
+                              medicineNameLower.includes('meloxicam') || medicineNameLower.includes('celecoxib') ||
+                              medicineNameLower.includes('etoricoxib') || medicineNameLower.includes('naproxen')) {
+                            targetSubcategory = 'NSAID';
+                            console.log(`   🔍 Inferred subcategory from category + medicine name: "NSAID"`);
+                          }
+                        }
+                      }
+                      
+                      // Infer từ medicine name nếu vẫn chưa có
+                      if (!targetSubcategory) {
+                        const medicineNameLower = (targetMedicine.name || genericName || cleanMedicineText || '').toLowerCase();
+                        if (medicineNameLower.includes('prednisolon') || medicineNameLower.includes('prednisone') || 
+                            medicineNameLower.includes('dexamethason') || medicineNameLower.includes('hydrocortison') ||
+                            medicineNameLower.includes('methylprednisolon') || medicineNameLower.includes('betamethason')) {
+                          targetSubcategory = 'Corticosteroid';
+                          console.log(`   🔍 Inferred subcategory from medicine name: "Corticosteroid"`);
+                        } else if (medicineNameLower.includes('paracetamol') || medicineNameLower.includes('acetaminophen') ||
+                                   medicineNameLower.includes('panadol') || medicineNameLower.includes('efferalgan')) {
+                          targetSubcategory = 'Paracetamol';
+                          console.log(`   🔍 Inferred subcategory from medicine name: "Paracetamol"`);
+                        } else if (medicineNameLower.includes('diclofenac') || medicineNameLower.includes('ibuprofen') || 
+                                   medicineNameLower.includes('meloxicam') || medicineNameLower.includes('celecoxib') ||
+                                   medicineNameLower.includes('etoricoxib') || medicineNameLower.includes('naproxen') ||
+                                   medicineNameLower.includes('voltaren')) {
+                          targetSubcategory = 'NSAID';
+                          console.log(`   🔍 Inferred subcategory from medicine name: "NSAID"`);
+                        }
+                      }
+                    }
+                    
+                    console.log(`🔍 Found target medicine in medicines collection: ${targetMedicine.name}`);
+                    console.log(`   Indication: ${targetIndication}`);
+                    console.log(`   GroupTherapeutic: ${targetGroupTherapeutic}`);
+                    console.log(`   ActiveIngredient: ${targetActiveIngredient}`);
+                    console.log(`   Subcategory: ${targetSubcategory || 'N/A'} ${aiAnalysis?.subcategory ? '(from AI)' : (targetMedicine.subcategory ? '(from DB)' : '(inferred)')}`);
+                    console.log(`   Category: ${targetCategory || 'N/A'} ${aiAnalysis?.category ? '(from AI)' : '(from DB)'}`);
+                    console.log(`   DosageForm: ${targetDosageForm || 'N/A'} ${aiAnalysis?.dosageForm ? '(from AI)' : '(from DB)'}`);
+                    console.log(`   Route: ${targetRoute || 'N/A'} ${aiAnalysis?.route ? '(from AI)' : '(from DB)'}`);
+                    break;
+                  }
+                }
+              }
+            }
+            
+            // FALLBACK: Nếu vẫn thiếu subcategory sau khi tìm targetMedicine, thử infer từ các nguồn khác
+            if (!targetSubcategory && targetMedicine) {
+              // Infer từ groupTherapeutic
+              if (targetGroupTherapeutic) {
+                const groupLower = targetGroupTherapeutic.toLowerCase();
+                if (groupLower.includes('corticosteroid') || groupLower.includes('cortico') || groupLower.includes('steroid')) {
+                  targetSubcategory = 'Corticosteroid';
+                  console.log(`   🔍 Inferred subcategory from groupTherapeutic (after DB lookup): "Corticosteroid"`);
+                } else if (groupLower.includes('nsaid') || groupLower.includes('anti-inflammatory') || groupLower.includes('kháng viêm')) {
+                  targetSubcategory = 'NSAID';
+                  console.log(`   🔍 Inferred subcategory from groupTherapeutic (after DB lookup): "NSAID"`);
+                } else if (groupLower.includes('paracetamol') || groupLower.includes('acetaminophen')) {
+                  targetSubcategory = 'Paracetamol';
+                  console.log(`   🔍 Inferred subcategory from groupTherapeutic (after DB lookup): "Paracetamol"`);
+                }
+              }
+              
+              // Infer từ category nếu vẫn chưa có
+              if (!targetSubcategory && targetCategory) {
+                const categoryLower = targetCategory.toLowerCase();
+                const medicineNameLower = (targetMedicine.name || genericName || cleanMedicineText || '').toLowerCase();
+                
+                if (categoryLower.includes('nội tiết') || categoryLower.includes('hormone')) {
+                  if (medicineNameLower.includes('prednisolon') || medicineNameLower.includes('prednisone') || 
+                      medicineNameLower.includes('dexamethason') || medicineNameLower.includes('hydrocortison')) {
+                    targetSubcategory = 'Corticosteroid';
+                    console.log(`   🔍 Inferred subcategory from category + medicine name (after DB lookup): "Corticosteroid"`);
+                  }
+                } else if (categoryLower.includes('cơ xương khớp') || categoryLower.includes('giảm đau')) {
+                  if (medicineNameLower.includes('diclofenac') || medicineNameLower.includes('ibuprofen') || 
+                      medicineNameLower.includes('meloxicam') || medicineNameLower.includes('celecoxib') ||
+                      medicineNameLower.includes('etoricoxib') || medicineNameLower.includes('naproxen')) {
+                    targetSubcategory = 'NSAID';
+                    console.log(`   🔍 Inferred subcategory from category + medicine name (after DB lookup): "NSAID"`);
+                  }
+                }
+              }
+              
+              // Infer từ medicine name nếu vẫn chưa có
+              if (!targetSubcategory) {
+                const medicineNameLower = (targetMedicine.name || genericName || cleanMedicineText || '').toLowerCase();
+                if (medicineNameLower.includes('prednisolon') || medicineNameLower.includes('prednisone') || 
+                    medicineNameLower.includes('dexamethason') || medicineNameLower.includes('hydrocortison') ||
+                    medicineNameLower.includes('methylprednisolon') || medicineNameLower.includes('betamethason')) {
+                  targetSubcategory = 'Corticosteroid';
+                  console.log(`   🔍 Inferred subcategory from medicine name (after DB lookup): "Corticosteroid"`);
+                } else if (medicineNameLower.includes('paracetamol') || medicineNameLower.includes('acetaminophen') ||
+                           medicineNameLower.includes('panadol') || medicineNameLower.includes('efferalgan')) {
+                  targetSubcategory = 'Paracetamol';
+                  console.log(`   🔍 Inferred subcategory from medicine name (after DB lookup): "Paracetamol"`);
+                } else if (medicineNameLower.includes('diclofenac') || medicineNameLower.includes('ibuprofen') || 
+                           medicineNameLower.includes('meloxicam') || medicineNameLower.includes('celecoxib') ||
+                           medicineNameLower.includes('etoricoxib') || medicineNameLower.includes('naproxen') ||
+                           medicineNameLower.includes('voltaren')) {
+                  targetSubcategory = 'NSAID';
+                  console.log(`   🔍 Inferred subcategory from medicine name (after DB lookup): "NSAID"`);
+                }
+              }
+            }
+            
+            // Cập nhật lại hasAll4TargetConditions sau khi tìm targetMedicine và infer subcategory
+            let finalHasAll4TargetConditions = !!(targetCategory && targetSubcategory && targetDosageForm && targetRoute);
+            if (finalHasAll4TargetConditions !== hasAll4TargetConditions) {
+              console.log(`   ✅ Updated hasAll4TargetConditions: ${hasAll4TargetConditions} -> ${finalHasAll4TargetConditions}`);
+              console.log(`   ✅ Final 4 conditions: Category="${targetCategory}", Subcategory="${targetSubcategory}", DosageForm="${targetDosageForm}", Route="${targetRoute}"`);
+            }
+            
+            // Chỉ tiếp tục tìm suggestions nếu có đủ 4 điều kiện (sau khi đã bổ sung từ DB)
+            if (finalHasAll4TargetConditions) {
+              
+              // Step 2: Find medicines with same activeIngredient first (like Web)
+              let medicinesWithSameActiveIngredient: any[] = [];
+              if (activeIngredientToSearch) {
+                const mainActiveIngredient = activeIngredientToSearch.split(/[,;]/)[0]?.trim();
+                if (mainActiveIngredient && mainActiveIngredient.length > 3) {
+                  console.log(`🔍 Priority: Searching medicines with same activeIngredient: "${mainActiveIngredient}"`);
+                  const escapedMainActiveIngredient = mainActiveIngredient.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                  const searchCriteria: any = {
+                    $or: [
+                      { activeIngredient: { $regex: escapedMainActiveIngredient, $options: 'i' } },
+                      { genericName: { $regex: escapedMainActiveIngredient, $options: 'i' } },
+                      { name: { $regex: escapedMainActiveIngredient, $options: 'i' } }
+                    ]
+                  };
+                  
+                  if (targetMedicine) {
+                    searchCriteria._id = { $ne: targetMedicine._id };
+                  }
+                  
+                  medicinesWithSameActiveIngredient = await medicinesCollection.find(searchCriteria)
+                    .limit(15)
+                    .toArray();
+                  console.log(`📦 Found ${medicinesWithSameActiveIngredient.length} medicines with same activeIngredient`);
+                }
+              }
+              
+              // Step 3: Find medicinesWithSameIndication (like Web) - search with 4 conditions if available
+              const medicineNameLower = cleanMedicineText.toLowerCase();
+              const nsaidMedicinesList = ['celecoxib', 'etoricoxib', 'meloxicam', 'diclofenac', 'ibuprofen', 'naproxen', 'indomethacin', 'piroxicam', 'ketoprofen', 'rofecoxib', 'valdecoxib'];
+              const isNSAIDMedicine = targetGroupTherapeutic?.toLowerCase().includes('nsaid') || 
+                                     nsaidMedicinesList.some(name => medicineNameLower.includes(name));
+              
+              if (!targetGroupTherapeutic && isNSAIDMedicine) {
+                targetGroupTherapeutic = 'NSAID';
+              }
+              
+              // Build search criteria for medicinesWithSameIndication (like Web - with 4 conditions if available)
+              const searchCriteriaForIndication: any = {};
+              if (targetMedicine) {
+                searchCriteriaForIndication._id = { $ne: targetMedicine._id };
+              }
+              
+              // Tạo điều kiện AND cho 4 tiêu chí chính: category, subcategory, dosageForm, route (like Web)
+              const andConditions: any[] = [];
+              const orConditions: any[] = [];
+              
+              // ƯU TIÊN 1: Tìm thuốc có CẢ 4 điều kiện (category, subcategory, dosageForm, route) - độ chính xác cao nhất
+              if (targetCategory && targetSubcategory && targetDosageForm && targetRoute) {
+                andConditions.push({ category: targetCategory });
+                andConditions.push({ subcategory: targetSubcategory });
+                andConditions.push({ dosageForm: targetDosageForm });
+                andConditions.push({ route: targetRoute });
+                console.log(`   Priority 1: Searching by ALL 4 conditions: category="${targetCategory}", subcategory="${targetSubcategory}", dosageForm="${targetDosageForm}", route="${targetRoute}"`);
+              } else {
+                // Nếu không có đầy đủ 4 điều kiện, tìm theo từng điều kiện có sẵn
+                if (targetCategory) {
+                  andConditions.push({ category: targetCategory });
+                  console.log(`   Priority 1a: Searching by category: "${targetCategory}"`);
+                }
+                if (targetSubcategory) {
+                  andConditions.push({ subcategory: targetSubcategory });
+                  console.log(`   Priority 1b: Searching by subcategory: "${targetSubcategory}"`);
+                }
+                if (targetDosageForm) {
+                  andConditions.push({ dosageForm: targetDosageForm });
+                  console.log(`   Priority 1c: Searching by dosageForm: "${targetDosageForm}"`);
+                }
+                if (targetRoute) {
+                  andConditions.push({ route: targetRoute });
+                  console.log(`   Priority 1d: Searching by route: "${targetRoute}"`);
+                }
+              }
+              
+              // ƯU TIÊN 2: Tìm cùng activeIngredient (nếu có) - thêm vào AND conditions
+              if (targetActiveIngredient) {
+                const mainActiveIngredient = targetActiveIngredient.split(/[,;]/)[0]?.trim();
+                if (mainActiveIngredient && mainActiveIngredient.length > 3) {
+                  const escapedMainActiveIngredient = mainActiveIngredient.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                  andConditions.push({ 
+                    $or: [
+                      { activeIngredient: { $regex: escapedMainActiveIngredient, $options: 'i' } },
+                      { genericName: { $regex: escapedMainActiveIngredient, $options: 'i' } }
+                    ]
+                  });
+                  console.log(`   Priority 2: Searching by activeIngredient: "${mainActiveIngredient}"`);
+                }
+              }
+              
+              // Fallback: Nếu không tìm thấy với AND conditions, thử tìm với OR conditions
+              // ƯU TIÊN 3: Tìm cùng groupTherapeutic (nếu có) - chỉ dùng khi không có đủ 4 điều kiện
+              if (targetGroupTherapeutic && andConditions.length === 0) {
+                orConditions.push({ groupTherapeutic: targetGroupTherapeutic });
+                const escapedTargetGroupTherapeutic = targetGroupTherapeutic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                orConditions.push({ groupTherapeutic: { $regex: escapedTargetGroupTherapeutic, $options: 'i' } });
+                const groupLower = targetGroupTherapeutic.toLowerCase();
+                if (groupLower.includes('nsaid') || groupLower.includes('anti-inflammatory') || groupLower.includes('kháng viêm')) {
+                  orConditions.push({ 
+                    groupTherapeutic: { 
+                      $regex: /nsaid|anti-inflammatory|kháng viêm|giảm đau/i 
+                    } 
+                  });
+                } else if (groupLower.includes('corticosteroid') || groupLower.includes('cortico')) {
+                  orConditions.push({ 
+                    groupTherapeutic: { 
+                      $regex: /corticosteroid|cortico|prednisolon|prednisone|dexamethasone/i 
+                    } 
+                  });
+                } else if (groupLower.includes('kháng sinh') || groupLower.includes('antibiotic')) {
+                  orConditions.push({ 
+                    groupTherapeutic: { 
+                      $regex: /kháng sinh|antibiotic|amoxicillin|penicillin/i 
+                    } 
+                  });
+                }
+                console.log(`   Priority 3 (fallback): Searching by groupTherapeutic: "${targetGroupTherapeutic}"`);
+              }
+              
+              // ƯU TIÊN 4: Tìm cùng indication (nếu có) - chỉ dùng khi không có đủ 4 điều kiện
+              if (targetIndication && andConditions.length === 0) {
+                orConditions.push({ indication: targetIndication });
+                const escapedTargetIndication = targetIndication.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                orConditions.push({ indication: { $regex: escapedTargetIndication, $options: 'i' } });
+                
+                const indicationKeywords = targetIndication
+                  .toLowerCase()
+                  .split(/[,\s;]+/)
+                  .filter(word => word.length > 3 && !['điều', 'trị', 'các', 'bệnh', 'và', 'cho'].includes(word));
+                
+                for (const keyword of indicationKeywords.slice(0, 5)) {
+                  const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                  orConditions.push({ indication: { $regex: escapedKeyword, $options: 'i' } });
+                  orConditions.push({ description: { $regex: escapedKeyword, $options: 'i' } });
+                  orConditions.push({ uses: { $regex: escapedKeyword, $options: 'i' } });
+                  orConditions.push({ congDung: { $regex: escapedKeyword, $options: 'i' } });
+                }
+                console.log(`   Priority 4 (fallback): Searching by indication: "${targetIndication}"`);
+              }
+              
+              // Áp dụng điều kiện tìm kiếm: ưu tiên AND (4 điều kiện), sau đó mới đến OR (fallback)
+              if (andConditions.length > 0) {
+                searchCriteriaForIndication.$and = andConditions;
+                console.log(`   ✅ Using AND conditions (${andConditions.length} conditions)`);
+              } else if (orConditions.length > 0) {
+                searchCriteriaForIndication.$or = orConditions;
+                console.log(`   ⚠️ Using OR conditions (fallback, ${orConditions.length} conditions)`);
+              }
+              
+              const medicinesWithSameIndication = await medicinesCollection.find(searchCriteriaForIndication)
+                .limit(20) // Tăng limit để có nhiều kết quả hơn cho việc lọc
+                .toArray();
+              
+              console.log(`📦 Found ${medicinesWithSameIndication.length} medicines with search criteria`);
+              
+              // Step 4: Search directly in medicines collection by ALL 4 conditions (category, subcategory, dosageForm, route)
+              // This is the key difference - Web searches directly by 4 conditions, Mobile was missing this
+              let medicinesWithAll4ConditionsFromDirectSearch: any[] = [];
+              if (finalHasAll4TargetConditions) {
+                console.log(`🔍 Searching directly in medicines collection by ALL 4 conditions (like Web)...`);
+                const directSearchCriteria: any = {};
+                
+                if (targetMedicine) {
+                  directSearchCriteria._id = { $ne: targetMedicine._id };
+                }
+                
+                // Create AND conditions for all 4 criteria
+                const andConditions: any[] = [];
+                if (targetCategory) {
+                  andConditions.push({ category: targetCategory });
+                }
+                if (targetSubcategory) {
+                  andConditions.push({ subcategory: targetSubcategory });
+                }
+                if (targetDosageForm) {
+                  andConditions.push({ dosageForm: targetDosageForm });
+                }
+                if (targetRoute) {
+                  andConditions.push({ route: targetRoute });
+                }
+                
+                if (andConditions.length === 4) {
+                  directSearchCriteria.$and = andConditions;
+                  console.log(`   Priority 1: Searching by ALL 4 conditions: category="${targetCategory}", subcategory="${targetSubcategory}", dosageForm="${targetDosageForm}", route="${targetRoute}"`);
+                  
+                  medicinesWithAll4ConditionsFromDirectSearch = await medicinesCollection.find(directSearchCriteria)
+                    .limit(20)
+                    .toArray();
+                  
+                  console.log(`📦 Found ${medicinesWithAll4ConditionsFromDirectSearch.length} medicines with ALL 4 conditions from direct search`);
+                }
+              }
+              
+              // Step 5: Find additional products from Products collection (like Web) for NSAID
+              let additionalProductsFromDB: any[] = [];
+              // LUÔN tìm trong Products collection nếu là NSAID (kể cả khi targetGroupTherapeutic chưa được set)
+              if (isNSAIDMedicine) {
+                console.log(`🔍 Searching directly in Products collection for NSAID medicines (including Etoricoxib)...`);
+                // Đảm bảo targetGroupTherapeutic được set
+                if (!targetGroupTherapeutic) {
+                  targetGroupTherapeutic = 'NSAID';
+                  console.log(`   Setting targetGroupTherapeutic = 'NSAID' for Products search`);
+                }
+                
+                // Tìm các thuốc NSAID phổ biến trong Products collection
+                // Ưu tiên các thuốc COX-2 inhibitors như Etoricoxib, Celecoxib vì chúng tương tự nhau
+                const nsaidProductNames = ['etoricoxib', 'celecoxib', 'meloxicam', 'diclofenac', 'ibuprofen', 'naproxen', 'indomethacin', 'piroxicam', 'ketoprofen'];
+                for (const nsaidName of nsaidProductNames) {
+                  // Bỏ qua nếu đã tìm thấy trong medicines collection
+                  const alreadyFound = medicinesWithSameIndication.some(m => 
+                    (m.name || '').toLowerCase().includes(nsaidName) ||
+                    (m.genericName || '').toLowerCase().includes(nsaidName)
+                  );
+                  
+                  // Bỏ qua nếu đã có trong foundMedicines (đã match chính xác)
+                  const alreadyInPrescription = foundMedicines.some(fm => 
+                    (fm.productName || '').toLowerCase().includes(nsaidName)
+                  );
+                  
+                  if (!alreadyFound && !alreadyInPrescription) {
+                    const products = await Product.find({
+                      name: { $regex: nsaidName, $options: 'i' },
+                      inStock: true,
+                      stockQuantity: { $gt: 0 }
+                    }).limit(3);
+                    
+                    for (const product of products) {
+                      // Kiểm tra xem đã có trong foundMedicines chưa
+                      if (!isMedicineAlreadyInPrescription(product, foundMedicines)) {
+                        additionalProductsFromDB.push({
+                          product: product,
+                          groupTherapeutic: 'NSAID',
+                          indication: 'Giảm đau, kháng viêm',
+                          isFromProducts: true // Đánh dấu là tìm từ Products collection
+                        });
+                      }
+                    }
+                  }
+                }
+                console.log(`📦 Found ${additionalProductsFromDB.length} additional NSAID products from Products collection`);
+              }
+              
+              // Step 6: Filter medicinesWithAll4Conditions from medicinesWithSameIndication (like Web)
+              const medicinesWithAll4Conditions: any[] = [];
+              
+              // First, add medicines from direct search (these already match all 4 conditions)
+              for (const m of medicinesWithAll4ConditionsFromDirectSearch) {
+                const alreadyIncluded = medicinesWithAll4Conditions.some(existing => String(existing._id) === String(m._id));
+                if (!alreadyIncluded) {
+                  medicinesWithAll4Conditions.push(m);
+                  console.log(`   ✅ Added medicine from direct search matching all 4 conditions: ${m.name || m.productName}`);
+                }
+              }
+              
+              // Then, filter from medicinesWithSameIndication
+              for (const m of medicinesWithSameIndication) {
+                const alreadyIncluded = medicinesWithAll4Conditions.some(existing => String(existing._id) === String(m._id));
+                if (!alreadyIncluded) {
+                  const matchResult = await matchesAll4Conditions(m, targetCategory, targetSubcategory, targetDosageForm, targetRoute);
+                  
+                  if (matchResult.matches) {
+                    medicinesWithAll4Conditions.push(m);
+                    console.log(`   ✅ Added medicine matching all 4 conditions: ${m.name || m.productName}`);
+                  } else {
+                    console.log(`   ⚠️ Medicine does not match all 4 conditions: ${m.name || m.productName}`);
+                  }
+                }
+              }
+              
+              // Step 7: Add medicines from medicinesWithSameActiveIngredient that match 4 conditions
+              for (const ai of medicinesWithSameActiveIngredient) {
+                const alreadyIncluded = medicinesWithAll4Conditions.some(m => String(m._id) === String(ai._id));
+                
+                if (!alreadyIncluded) {
+                  const matchResult = await matchesAll4Conditions(ai, targetCategory, targetSubcategory, targetDosageForm, targetRoute);
+                  
+                  if (matchResult.matches) {
+                    medicinesWithAll4Conditions.push(ai);
+                    console.log(`   ✅ Added medicine from same activeIngredient matching all 4 conditions: ${ai.name || ai.productName}`);
+                  }
+                }
+              }
+              
+              console.log(`📊 Filtered medicines by ALL 4 conditions: ${medicinesWithAll4Conditions.length} medicines found`);
+              console.log(`   - From direct search: ${medicinesWithAll4ConditionsFromDirectSearch.length}`);
+              console.log(`   - From indication search: ${medicinesWithAll4Conditions.length - medicinesWithAll4ConditionsFromDirectSearch.length}`);
+              
+              // Step 8: Create allMedicinesToCheck (like Web)
+              const medicinesWithSameActiveIngredientAnd4Conditions = await Promise.all(
+                medicinesWithSameActiveIngredient.map(async (ai) => {
+                  const m = medicinesWithSameIndication.find(med => String(med._id) === String(ai._id));
+                  if (!m) return null;
+                  const matchResult = await matchesAll4Conditions(m, targetCategory, targetSubcategory, targetDosageForm, targetRoute);
+                  return matchResult.matches ? ai : null;
+                })
+              );
+              const filteredActiveIngredientMedicines = medicinesWithSameActiveIngredientAnd4Conditions.filter(m => m !== null) as any[];
+              
+              const allMedicinesFrom4Conditions = medicinesWithAll4Conditions.filter(m => 
+                !filteredActiveIngredientMedicines.some(fm => String(fm._id) === String(m._id))
+              );
+              
+              const allMedicinesToCheck = [
+                ...filteredActiveIngredientMedicines,
+                ...allMedicinesFrom4Conditions
+              ];
+              
+              console.log(`📋 allMedicinesToCheck: ${allMedicinesToCheck.length} medicines`);
+              console.log(`   - filteredActiveIngredientMedicines: ${filteredActiveIngredientMedicines.length}`);
+              console.log(`   - allMedicinesFrom4Conditions: ${allMedicinesFrom4Conditions.length}`);
+              
+              // Step 8: Process allMedicinesToCheck and find products, classify by dosage (like Web)
+              const medicinesWithSameDosage: any[] = [];
+              const medicinesDifferentDosage: any[] = [];
+              const normalizedInputDosage = extractedDosage ? normalizeDosageForComparison(extractedDosage) : null;
+              
+              // Check if original medicine is topical
+              const originalTextLower = cleanMedicineText.toLowerCase();
+              const isTopicalOriginal = /%\/\s*g|\bgel\b|\bemulgel\b|\bcream\b|\bkem\b|\bthuốc\s*bôi\b|\bthuoc\s*boi\b|\btuýp\b|\btuyp\b|\bointment\b|\bmỡ\b|\bmo\b/i.test(originalTextLower);
+              
+              // Process additionalProductsFromDB first (like Web)
+              for (const additionalProductData of additionalProductsFromDB) {
+                const product = additionalProductData.product;
+                const alreadyAdded = similarMedicines.some(m => String(m._id) === String(product._id));
+                
+                if (!alreadyAdded) {
+                  // Check 4 conditions for product
+                  const productInfo = await fetchMedicineInfo(product.name || '');
+                  const productCategory = product.category || productInfo?.category || '';
+                  const productSubcategory = product.subcategory || productInfo?.subcategory || '';
+                  const productDosageForm = product.dosageForm || productInfo?.dosageForm || '';
+                  const productRoute = product.route || productInfo?.route || '';
+                  
+                  const matchResult = await matchesAll4Conditions(
+                    { category: productCategory, subcategory: productSubcategory, dosageForm: productDosageForm, route: productRoute },
+                    targetCategory, targetSubcategory, targetDosageForm, targetRoute
+                  );
+                  
+                  if (matchResult.matches) {
+                    const productParsed = parseMedicineName(product.name || '');
+                    const normalizedProductDosage = productParsed.dosage ? normalizeDosageForComparison(productParsed.dosage) : null;
+                    const sameDosage = normalizedInputDosage && normalizedProductDosage && normalizedInputDosage === normalizedProductDosage;
+                    
+                    const isSameCategory = normalizeMedicineValue(targetCategory) === normalizeMedicineValue(productCategory);
+                    const isSameSubcategory = normalizeMedicineValue(targetSubcategory) === normalizeMedicineValue(productSubcategory);
+                    const isSameDosageForm = normalizeMedicineValue(targetDosageForm) === normalizeMedicineValue(productDosageForm);
+                    const isSameRoute = normalizeMedicineValue(targetRoute) === normalizeMedicineValue(productRoute);
+                    const isSameActiveIngredient = false; // Products from DB may not have activeIngredient info
+                    const isSameGroupTherapeutic = targetGroupTherapeutic && additionalProductData.groupTherapeutic && 
+                      (targetGroupTherapeutic.toLowerCase() === additionalProductData.groupTherapeutic.toLowerCase() ||
+                       (targetGroupTherapeutic.toLowerCase().includes('nsaid') && additionalProductData.groupTherapeutic.toLowerCase().includes('nsaid')));
+                    
+                    let matchReason = '';
+                    let confidence = 0.70;
+                    
+                    if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_route_same_dosage';
+                      confidence = 0.99;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_route';
+                      confidence = 0.98;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_dosage';
+                      confidence = 0.96;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm';
+                      confidence = 0.95;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameRoute && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_route_same_dosage';
+                      confidence = 0.94;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosage';
+                      confidence = 0.93;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm_same_route_same_dosage';
+                      confidence = 0.92;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm_same_dosage';
+                      confidence = 0.91;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient';
+                      confidence = 0.90;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm_same_route';
+                      confidence = 0.89;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm';
+                      confidence = 0.88;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameRoute && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_route_same_dosage';
+                      confidence = 0.87;
+                    } else if (isSameSubcategory && isSameActiveIngredient && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosage';
+                      confidence = 0.86;
+                    } else if (isSameCategory && isSameSubcategory) {
+                      matchReason = 'same_category_same_subcategory';
+                      confidence = 0.85;
+                    } else if (isSameSubcategory && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_subcategory_same_dosageForm_same_route';
+                      confidence = 0.84;
+                    } else if (isSameSubcategory && isSameDosageForm) {
+                      matchReason = 'same_subcategory_same_dosageForm';
+                      confidence = 0.83;
+                    } else if (isSameActiveIngredient && isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_activeIngredient_same_dosageForm_same_route_same_dosage';
+                      confidence = 0.82;
+                    } else if (isSameActiveIngredient && isSameDosageForm && sameDosage) {
+                      matchReason = 'same_activeIngredient_same_dosageForm_same_dosage';
+                      confidence = 0.81;
+                    } else if (isSameActiveIngredient && sameDosage) {
+                      matchReason = 'same_active_ingredient_same_dosage';
+                      confidence = 0.80;
+                    } else if (isSameSubcategory) {
+                      matchReason = 'same_subcategory';
+                      confidence = 0.75;
+                    } else if (isSameActiveIngredient && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_activeIngredient_same_dosageForm_same_route';
+                      confidence = 0.74;
+                    } else if (isSameActiveIngredient && isSameDosageForm) {
+                      matchReason = 'same_activeIngredient_same_dosageForm';
+                      confidence = 0.73;
+                    } else if (isSameActiveIngredient) {
+                      matchReason = 'same_active_ingredient_different_dosage';
+                      confidence = 0.70;
+                    } else if (isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_dosageForm_same_route_same_dosage';
+                      confidence = 0.69;
+                    } else if (isSameDosageForm && sameDosage) {
+                      matchReason = 'same_dosageForm_same_dosage';
+                      confidence = 0.68;
+                    } else if (isSameGroupTherapeutic && sameDosage) {
+                      matchReason = 'same_group_therapeutic_same_dosage';
+                      confidence = 0.75;
+                    } else if (isSameGroupTherapeutic) {
+                      matchReason = 'same_group_therapeutic';
+                      confidence = 0.70;
+                    } else {
+                      console.log(`   ⚠️ Skipping product with different groupTherapeutic: ${product.name}`);
+                      continue;
+                    }
+                    
+                    const suggestionInfo = await fetchMedicineInfo(product.name || '');
+                    const activeIngredient = product.activeIngredient || suggestionInfo?.activeIngredient || suggestionInfo?.genericName || '';
+                    const groupTherapeutic = product.groupTherapeutic || suggestionInfo?.groupTherapeutic || additionalProductData.groupTherapeutic || '';
+                    const contraindication = product.contraindication || suggestionInfo?.contraindication || suggestionInfo?.chongChiDinh || suggestionInfo?.contraindications || '';
+                    
+                    const fullIndication = additionalProductData.indication || suggestionInfo?.indication || suggestionInfo?.description || suggestionInfo?.uses || suggestionInfo?.congDung || '';
+                    let finalIndication = fullIndication;
+                    if (!finalIndication && groupTherapeutic) {
+                      const groupLower = groupTherapeutic.toLowerCase();
+                      if (groupLower.includes('nsaid') || groupLower.includes('kháng viêm')) {
+                        finalIndication = 'Giảm đau, kháng viêm';
+                      } else if (groupLower.includes('kháng sinh')) {
+                        finalIndication = 'Điều trị nhiễm khuẩn';
+                      } else {
+                        finalIndication = 'Điều trị theo chỉ định của bác sĩ';
+                      }
+                    }
+                    
+                    let finalContraindication = contraindication;
+                    if (!finalContraindication) {
+                      const medicineName = product.name || '';
+                      finalContraindication = await getContraindicationFromMedicines(medicineName, groupTherapeutic, null);
+                    }
+                    
+                    const productDosage = productParsed.dosage || extractedDosage || '';
+                    
+                    const medicineData = {
+                      ...product.toObject(),
+                      indication: finalIndication,
+                      contraindication: finalContraindication,
+                      dosage: productDosage,
+                      groupTherapeutic: groupTherapeutic,
+                      activeIngredient: activeIngredient,
+                      category: productCategory,
+                      subcategory: productSubcategory,
+                      dosageForm: productDosageForm,
+                      route: productRoute,
+                      matchReason: matchReason,
+                      matchExplanation: getMatchExplanation(matchReason, confidence),
+                      confidence: confidence
+                    };
+                    
+                    if (sameDosage) {
+                      medicinesWithSameDosage.push(medicineData);
+                    } else {
+                      medicinesDifferentDosage.push(medicineData);
+                    }
+                    
+                    similarMedicines.push(product);
+                    console.log(`✅ Added product from Products collection: ${product.name} (${Math.round(confidence * 100)}% match) - matches all 4 conditions`);
+                  }
+                }
+              }
+              
+              // Process medicines from allMedicinesToCheck
+              console.log(`📋 Processing ${allMedicinesToCheck.length} medicines from allMedicinesToCheck`);
+              for (const medicine of allMedicinesToCheck) {
+                const medicineNameForSearch = medicine.name?.split('(')[0].trim() || medicine.name || '';
+                const product = await Product.findOne({
+                  $or: [
+                    { name: { $regex: medicineNameForSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+                    { description: { $regex: medicineNameForSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+                    { brand: { $regex: medicineNameForSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+                  ]
+                });
+                
+                if (product) {
+                  const matchResult = await matchesAll4Conditions(medicine, targetCategory, targetSubcategory, targetDosageForm, targetRoute);
+                  
+                  if (matchResult.matches) {
+                    const productParsed = parseMedicineName(product.name || '');
+                    const normalizedProductDosage = productParsed.dosage ? normalizeDosageForComparison(productParsed.dosage) : null;
+                    const sameDosage = normalizedInputDosage && normalizedProductDosage && normalizedInputDosage === normalizedProductDosage;
+                    
+                    // Calculate detailed confidence and matchReason (like Web)
+                    const isSameCategory = targetCategory && medicine.category && 
+                      normalizeMedicineValue(targetCategory) === normalizeMedicineValue(medicine.category);
+                    const isSameSubcategory = targetSubcategory && medicine.subcategory && 
+                      normalizeMedicineValue(targetSubcategory) === normalizeMedicineValue(medicine.subcategory);
+                    const isSameActiveIngredient = medicinesWithSameActiveIngredient.length > 0 && 
+                      medicinesWithSameActiveIngredient.some(ai => String(ai._id) === String(medicine._id));
+                    const isSameDosageForm = targetDosageForm && medicine.dosageForm && 
+                      normalizeMedicineValue(targetDosageForm) === normalizeMedicineValue(medicine.dosageForm);
+                    const isSameRoute = targetRoute && medicine.route && 
+                      normalizeMedicineValue(targetRoute) === normalizeMedicineValue(medicine.route);
+                    
+                    let matchReason = '';
+                    let confidence = 0.70;
+                    
+                    // Calculate matchReason and confidence (synchronized with Web)
+                    // Ưu tiên theo thứ tự: category > subcategory > activeIngredient > dosageForm > route > dosage > groupTherapeutic
+                    if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_route_same_dosage';
+                      confidence = 0.99; // Độ chính xác cao nhất
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_route';
+                      confidence = 0.98;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_dosage';
+                      confidence = 0.96;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameDosageForm) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosageForm';
+                      confidence = 0.95;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && isSameRoute && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_route_same_dosage';
+                      confidence = 0.94;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient && sameDosage) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient_same_dosage';
+                      confidence = 0.93;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm_same_route_same_dosage';
+                      confidence = 0.92;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm_same_dosage';
+                      confidence = 0.91;
+                    } else if (isSameCategory && isSameSubcategory && isSameActiveIngredient) {
+                      matchReason = 'same_category_same_subcategory_same_activeIngredient';
+                      confidence = 0.90;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm_same_route';
+                      confidence = 0.89;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameDosageForm) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosageForm';
+                      confidence = 0.88;
+                    } else if (isSameSubcategory && isSameActiveIngredient && isSameRoute && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_route_same_dosage';
+                      confidence = 0.87;
+                    } else if (isSameSubcategory && isSameActiveIngredient && sameDosage) {
+                      matchReason = 'same_subcategory_same_activeIngredient_same_dosage';
+                      confidence = 0.86;
+                    } else if (isSameCategory && isSameSubcategory) {
+                      matchReason = 'same_category_same_subcategory';
+                      confidence = 0.85;
+                    } else if (isSameSubcategory && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_subcategory_same_dosageForm_same_route';
+                      confidence = 0.84;
+                    } else if (isSameSubcategory && isSameDosageForm) {
+                      matchReason = 'same_subcategory_same_dosageForm';
+                      confidence = 0.83;
+                    } else if (isSameActiveIngredient && isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_activeIngredient_same_dosageForm_same_route_same_dosage';
+                      confidence = 0.82;
+                    } else if (isSameActiveIngredient && isSameDosageForm && sameDosage) {
+                      matchReason = 'same_activeIngredient_same_dosageForm_same_dosage';
+                      confidence = 0.81;
+                    } else if (isSameActiveIngredient && sameDosage) {
+                      matchReason = 'same_active_ingredient_same_dosage';
+                      confidence = 0.80;
+                    } else if (isSameSubcategory) {
+                      matchReason = 'same_subcategory';
+                      confidence = 0.75;
+                    } else if (isSameActiveIngredient && isSameDosageForm && isSameRoute) {
+                      matchReason = 'same_activeIngredient_same_dosageForm_same_route';
+                      confidence = 0.74;
+                    } else if (isSameActiveIngredient && isSameDosageForm) {
+                      matchReason = 'same_activeIngredient_same_dosageForm';
+                      confidence = 0.73;
+                    } else if (isSameActiveIngredient) {
+                      matchReason = 'same_active_ingredient_different_dosage';
+                      confidence = 0.70;
+                    } else if (isSameDosageForm && isSameRoute && sameDosage) {
+                      matchReason = 'same_dosageForm_same_route_same_dosage';
+                      confidence = 0.69;
+                    } else if (isSameDosageForm && sameDosage) {
+                      matchReason = 'same_dosageForm_same_dosage';
+                      confidence = 0.68;
+                    } else {
+                      matchReason = 'same_category_same_subcategory_same_dosageForm_same_route';
+                      confidence = 0.90;
+                    }
+                    
+                    const suggestionInfo = await fetchMedicineInfo(product.name || '');
+                    const activeIngredient = product.activeIngredient || suggestionInfo?.activeIngredient || suggestionInfo?.genericName || medicine.activeIngredient || '';
+                    const groupTherapeutic = product.groupTherapeutic || suggestionInfo?.groupTherapeutic || medicine.groupTherapeutic || '';
+                    const contraindication = product.contraindication || suggestionInfo?.contraindication || suggestionInfo?.chongChiDinh || suggestionInfo?.contraindications || medicine.contraindication || '';
+                    
+                    const medicineData = {
+                      productId: String(product._id),
+                      productName: product.name,
+                      price: product.price,
+                      unit: product.unit,
+                      confidence: confidence,
+                      matchReason: matchReason,
+                      activeIngredient: activeIngredient,
+                      groupTherapeutic: groupTherapeutic,
+                      contraindication: contraindication || undefined,
+                      category: medicine.category || '',
+                      subcategory: medicine.subcategory || '',
+                      dosageForm: medicine.dosageForm || '',
+                      route: medicine.route || '',
+                      name: product.name, // For filtering
+                      productName: product.name, // For filtering
+                    };
+                    
+                    if (sameDosage) {
+                      medicinesWithSameDosage.push(medicineData);
+                    } else {
+                      medicinesDifferentDosage.push(medicineData);
+                    }
+                    
+                    similarMedicines.push(product);
+                    console.log(`   ✅ Added medicine matching all 4 conditions: ${product.name} (${sameDosage ? 'same dosage' : 'different dosage'})`);
+                  }
+                }
+              }
+              
+              // Step 9: Prioritize medicines (same dosage first, then different dosage) - like Web
+              let prioritizedMedicines = [...medicinesWithSameDosage, ...medicinesDifferentDosage];
+              
+              console.log(`📊 Prioritized medicines before filtering: ${prioritizedMedicines.length} medicines`);
+              if (prioritizedMedicines.length > 0) {
+                console.log(`   Medicines:`, prioritizedMedicines.map(m => `${m.name || m.productName} (${Math.round((m.confidence || 0) * 100)}%)`));
+              }
+              
+              // Step 10: (removed) Topical/non-topical filter to match Web behavior – keep full list
+              
+              // Step 11: Final filter by conditions and convert to suggestions, sort by confidence (like Web)
+              // Prefer strict 4/4. If none found, relax to 3/4 (user-requested) to avoid empty suggestions.
+              const conditionEvaluations: Array<{ med: any; matchCount: number; matchesAll: boolean }> = [];
+              for (const med of prioritizedMedicines) {
+                const matchResult = await matchesAll4Conditions(med, targetCategory, targetSubcategory, targetDosageForm, targetRoute);
+                conditionEvaluations.push({
+                  med,
+                  matchCount: matchResult.matchCount,
+                  matchesAll: matchResult.matches,
+                });
               }
 
-              const suggestion = {
-                productId: String(p._id || p.productId),
-                productName: suggestionName,
-                price: p.price,
-                unit: p.unit,
-                confidence: p.confidence || 0.3,
-                matchReason,
-                activeIngredient,
-                groupTherapeutic,
-                contraindication: contraindication || undefined,
-              };
-              console.log(
-                `  ✅ Suggestion: ${suggestion.productName} (ID: ${suggestion.productId}, confidence: ${suggestion.confidence}, reason: ${suggestion.matchReason})`
-              );
-              return suggestion;
-            })
-          );
+              let acceptedMedicines = conditionEvaluations
+                .filter((x) => x.matchesAll)
+                .map((x) => ({ ...x.med, __matchCount: 4 }));
+
+              if (acceptedMedicines.length === 0) {
+                const relaxed = conditionEvaluations
+                  .filter((x) => x.matchCount >= 3)
+                  .sort((a, b) => {
+                    // Prefer higher matchCount then higher confidence
+                    const mc = (b.matchCount || 0) - (a.matchCount || 0);
+                    if (mc !== 0) return mc;
+                    return Number(b.med?.confidence || 0) - Number(a.med?.confidence || 0);
+                  })
+                  .map((x) => ({ ...x.med, __matchCount: x.matchCount }));
+
+                if (relaxed.length > 0) {
+                  console.log(`⚠️ No medicines match 4/4. Relaxing to 3/4 and found ${relaxed.length} candidate(s).`);
+                  acceptedMedicines = relaxed;
+                } else {
+                  console.log(`⚠️ No medicines match 4/4 or 3/4 conditions - suggestions may be empty.`);
+                }
+              } else {
+                console.log(`✅ Found ${acceptedMedicines.length} medicine(s) matching 4/4 conditions.`);
+              }
+
+              for (const med of acceptedMedicines) {
+                similarMedicines.push(med);
+              }
+              
+              // Filter out medicines already in prescription (like Web)
+              const filteredSimilarMedicines = similarMedicines.filter(med => {
+                return !isMedicineAlreadyInPrescription(med, foundMedicines);
+              });
+              
+              if (filteredSimilarMedicines.length === 0) {
+                console.log(`⚠️ All similar medicines are already in prescription, skipping suggestions`);
+              } else {
+                console.log(`📋 Filtered similar medicines (removed ${similarMedicines.length - filteredSimilarMedicines.length} duplicates):`, filteredSimilarMedicines.map(m => ({ name: m.name || m.productName, confidence: m.confidence || 0 })));
+              }
+              
+              // Convert to suggestions format (like Web)
+              // Sort candidates: prefer 4/4 over 3/4, then by confidence
+              filteredSimilarMedicines.sort((a: any, b: any) => {
+                const mc = Number(b.__matchCount || 0) - Number(a.__matchCount || 0);
+                if (mc !== 0) return mc;
+                return Number(b.confidence || 0) - Number(a.confidence || 0);
+              });
+
+              const suggestionsArray = await Promise.all(filteredSimilarMedicines.map(async (med) => {
+                // Normalize imageUrl
+                let imageUrl = med.imageUrl || med.image || med.imagePath || '';
+                if (imageUrl && !imageUrl.startsWith('http') && !imageUrl.startsWith('/') && !imageUrl.startsWith('data:')) {
+                  imageUrl = `/medicine-images/${imageUrl}`;
+                }
+                if (!imageUrl || imageUrl === '') {
+                  imageUrl = '/medicine-images/default-medicine.jpg';
+                }
+                
+                // Get description from medicines collection if med doesn't have it
+                const description = await getProductDescription(med);
+                
+                // Get indication/description, groupTherapeutic, category, subcategory, dosageForm, route from medicines collection
+                let indication = med.indication || '';
+                let groupTherapeutic = med.groupTherapeutic || '';
+                let category = med.category || '';
+                let subcategory = med.subcategory || '';
+                let dosageForm = med.dosageForm || '';
+                let route = med.route || '';
+                let contraindication = med.contraindication || '';
+                let medicineInfo: any = null;
+                
+                if (med.indication) {
+                  indication = med.indication;
+                } else if (med.description && med.description.length > 20) {
+                  indication = med.description;
+                }
+                
+                if (med.groupTherapeutic) {
+                  groupTherapeutic = med.groupTherapeutic;
+                }
+                
+                // Lấy từ med object trước (đã có từ similarMedicines) - ƯU TIÊN CAO NHẤT
+                if (med.category) {
+                  category = med.category;
+                }
+                if (med.subcategory) {
+                  subcategory = med.subcategory;
+                }
+                if (med.dosageForm) {
+                  dosageForm = med.dosageForm;
+                }
+                if (med.route) {
+                  route = med.route;
+                }
+                
+                // Try to get from medicines collection if not found
+                const db = mongoose.connection.db;
+                if (db) {
+                  const medicinesCollection = db.collection('medicines');
+                  const searchName = med.name?.split('(')[0].trim() || med.productName?.split('(')[0].trim() || '';
+                  
+                  if (searchName) {
+                    medicineInfo = await medicinesCollection.findOne({
+                      $or: [
+                        { name: { $regex: searchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+                        { brand: { $regex: searchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+                        { genericName: { $regex: searchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+                        { activeIngredient: { $regex: searchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } }
+                      ]
+                    });
+                    
+                    // Nếu không tìm được, thử tìm với các từ khóa chính
+                    if (!medicineInfo && searchName) {
+                      const keywords = searchName.split(/\s+/).filter((k: string) => k.length > 3);
+                      if (keywords.length > 0) {
+                        const keywordConditions = keywords.map((kw: string) => {
+                          const escapedKeyword = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                          return { name: { $regex: escapedKeyword, $options: 'i' } };
+                        });
+                        medicineInfo = await medicinesCollection.findOne({
+                          $or: keywordConditions
+                        });
+                      }
+                    }
+                  }
+                  
+                  if (medicineInfo) {
+                    if (medicineInfo.indication && !indication) {
+                      indication = medicineInfo.indication;
+                    }
+                    if (medicineInfo.groupTherapeutic && !groupTherapeutic) {
+                      groupTherapeutic = medicineInfo.groupTherapeutic;
+                    }
+                    if (medicineInfo.category && !category) {
+                      category = medicineInfo.category;
+                    }
+                    if (medicineInfo.subcategory && !subcategory) {
+                      subcategory = medicineInfo.subcategory;
+                    }
+                    if (medicineInfo.dosageForm && !dosageForm) {
+                      dosageForm = medicineInfo.dosageForm;
+                    }
+                    if (medicineInfo.route && !route) {
+                      route = medicineInfo.route;
+                    }
+                    if (!contraindication) {
+                      contraindication = medicineInfo.contraindication || 
+                                        medicineInfo.chongChiDinh || 
+                                        medicineInfo.contraindications || 
+                                        '';
+                    }
+                  }
+                }
+                
+                // Nếu vẫn không có chống chỉ định, sử dụng helper function
+                if (!contraindication) {
+                  const medicineName = med.name || med.productName || '';
+                  const finalGroupTherapeutic = groupTherapeutic || med.groupTherapeutic || '';
+                  contraindication = await getContraindicationFromMedicines(medicineName, finalGroupTherapeutic, medicineInfo);
+                }
+                
+                // QUAN TRỌNG: Đảm bảo tất cả 4 trường đều có giá trị (với fallback từ AI analysis nếu cần)
+                if (!category && aiAnalysis?.category) {
+                  category = aiAnalysis.category;
+                }
+                if (!subcategory && aiAnalysis?.subcategory) {
+                  subcategory = aiAnalysis.subcategory;
+                }
+                if (!dosageForm && aiAnalysis?.dosageForm) {
+                  dosageForm = aiAnalysis.dosageForm;
+                }
+                if (!route && aiAnalysis?.route) {
+                  route = aiAnalysis.route;
+                }
+                
+                const medName = med.name || med.productName || cleanMedicineText;
+                const parsedName = parseMedicineName(medName);
+                
+                return {
+                  productId: med._id ? String(med._id) : (med.productId ? String(med.productId) : 'unknown'),
+                  productName: medName,
+                  price: Number(med.price || 0),
+                  originalPrice: Number(med.originalPrice || med.price || 0),
+                  unit: med.unit || 'đơn vị',
+                  inStock: med.inStock !== undefined ? med.inStock : (Number(med.stockQuantity || 0) > 0),
+                  stockQuantity: Number(med.stockQuantity || 0),
+                  requiresPrescription: med.isPrescription || false,
+                  imageUrl: imageUrl,
+                  description: description,
+                  brand: med.brand || '',
+                  confidence: Number(med.confidence || 0.6),
+                  matchReason: med.matchReason || 'similar',
+                  dosage: parsedName.dosage || med.dosage || '',
+                  indication: indication,
+                  groupTherapeutic: groupTherapeutic,
+                  category: category || '',
+                  subcategory: subcategory || '',
+                  dosageForm: dosageForm || '',
+                  route: route || '',
+                  contraindication: contraindication,
+                  matchExplanation: getMatchExplanation(med.matchReason || 'similar', med.confidence || 0.6)
+                };
+              }));
+              
+              // Sort by confidence (highest first), then by matchReason priority (like Web)
+              suggestionsArray.sort((a, b) => {
+                // First sort by confidence (descending)
+                if (b.confidence !== a.confidence) {
+                  return b.confidence - a.confidence;
+                }
+                // Then sort by matchReason priority
+                const matchReasonPriority: { [key: string]: number } = {
+                  'same_name_same_dosage': 1,
+                  'same_name_different_dosage': 2,
+                  'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_route_same_dosage': 3,
+                  'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_route': 4,
+                  'same_category_same_subcategory_same_activeIngredient_same_dosageForm_same_dosage': 5,
+                  'same_category_same_subcategory_same_activeIngredient_same_dosageForm': 6,
+                  'similar': 100
+                };
+                const priorityA = matchReasonPriority[a.matchReason] || 50;
+                const priorityB = matchReasonPriority[b.matchReason] || 50;
+                return priorityA - priorityB;
+              });
+              
+              // Return all sorted suggestions (like Web)
+              if (suggestionsArray.length > 0) {
+                suggestions.push(...suggestionsArray);
+                console.log(`   ✅ Added ${suggestionsArray.length} sorted suggestions (top: ${suggestionsArray[0].productName}, ${suggestionsArray[0].matchReason}, confidence: ${Math.round(suggestionsArray[0].confidence * 100)}%)`);
+              }
+            }
+          }
           
-          // Always add to notFoundMedicines with suggestions (guaranteed to have at least 1)
+          // Note: Removed fallback to findSimilarMedicines to match Web behavior
+          // Only return suggestions from medicines collection that match all 4 conditions
+          
+          // Filter suggestions: only keep those matching all 4 conditions (if available)
+          // Note: finalHasAll4TargetConditions is only available inside the if (db) block above
+          // So we need to check again here
+          const finalCheckHasAll4TargetConditions = !!(targetCategory && targetSubcategory && targetDosageForm && targetRoute);
+          let filteredSuggestions = suggestions;
+          if (finalCheckHasAll4TargetConditions) {
+            const matched4of4: typeof suggestions = [];
+            const matched3of4: typeof suggestions = [];
+            for (const suggestion of suggestions) {
+              const matchResult = await matchesAll4Conditions(
+                suggestion,
+                targetCategory,
+                targetSubcategory,
+                targetDosageForm,
+                targetRoute
+              );
+              if (matchResult.matches) {
+                matched4of4.push(suggestion);
+                console.log(`   ✅ Suggestion matches all 4 conditions: ${suggestion.productName}`);
+              } else if (matchResult.matchCount >= 3) {
+                matched3of4.push(suggestion);
+                console.log(`   ⚠️ Suggestion matches 3/4 conditions (relaxed): ${suggestion.productName}`);
+              } else {
+                console.log(`   ❌ Suggestion does NOT match >=3/4 conditions: ${suggestion.productName}`);
+                console.log(`      Category: ${matchResult.details.category ? '✅' : '❌'} (${suggestion.category || 'N/A'} vs ${targetCategory})`);
+                console.log(`      Subcategory: ${matchResult.details.subcategory ? '✅' : '❌'} (${suggestion.subcategory || 'N/A'} vs ${targetSubcategory})`);
+                console.log(`      DosageForm: ${matchResult.details.dosageForm ? '✅' : '❌'} (${suggestion.dosageForm || 'N/A'} vs ${targetDosageForm})`);
+                console.log(`      Route: ${matchResult.details.route ? '✅' : '❌'} (${suggestion.route || 'N/A'} vs ${targetRoute})`);
+              }
+            }
+            // Prefer 4/4 if any; otherwise relax to 3/4 (user-requested)
+            filteredSuggestions = matched4of4.length > 0 ? matched4of4 : matched3of4;
+          }
+          
+          // Sort suggestions by confidence (highest first) and matchReason priority
+          const sortedSuggestions = filteredSuggestions.sort((a, b) => {
+            if (b.confidence !== a.confidence) {
+              return b.confidence - a.confidence;
+            }
+            const reasonPriority: { [key: string]: number } = {
+              'same_name_same_dosage': 4,
+              'same_name_different_dosage': 3,
+              'similar_name': 2,
+              'partial_name_match': 1,
+            };
+            const aPriority = reasonPriority[a.matchReason] || 0;
+            const bPriority = reasonPriority[b.matchReason] || 0;
+            return bPriority - aPriority;
+          });
+          
+          // Keep full sorted suggestions (match Web behavior of returning all suggestions)
+          const finalSuggestions = sortedSuggestions;
+          
+          console.log(`📊 Filtered suggestions: ${suggestions.length} -> ${filteredSuggestions.length} -> ${finalSuggestions.length} (return all)`);
+          
+          // Always add to notFoundMedicine with suggestions
           result.notFoundMedicine = {
             originalText: medicineText,
-            suggestions
+            originalDosage: extractedDosage || parseMedicineName(cleanMedicineText).dosage,
+            suggestions: finalSuggestions,
+            aiAnalysis: aiAnalysis || null // Lưu kết quả AI analysis
           };
           
           // Add to relatedMedicines for overall suggestions
@@ -2226,29 +3967,12 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
             }
           }
         } else {
-          // Find similar medicines for suggestions
-          const similarInput = searchTerms[0] || cleanMedicineText;
-          console.log(`🔍 Fallback: Searching for similar medicines for: "${similarInput}"`);
-          const similarMedicines = await findSimilarMedicines(similarInput, medicineText, 5);
-          console.log(`📊 Fallback: Found ${similarMedicines.length} similar medicines`);
-          
-          const suggestions = similarMedicines.map((p: any) => {
-            return {
-              productId: String(p._id || p.productId),
-              productName: p.name,
-              price: p.price,
-              unit: p.unit,
-              confidence: p.confidence || 0.3,
-              matchReason: p.matchReason || 'general_suggestion'
-            };
-          });
-          
+          // No exact match found - add to notFoundMedicines without suggestions (synchronized with Web)
+          // Only return suggestions when we have all 4 conditions from AI analysis
           notFoundMedicines.push({
             originalText: medicineText,
-            suggestions
+            suggestions: []
           });
-          
-          relatedMedicines.push(...similarMedicines);
           requiresConsultation = true;
         }
       }
@@ -2281,18 +4005,231 @@ async function performAIAnalysis(prescriptionText?: string, prescriptionImage?: 
     index === self.findIndex((m) => String(m._id) === String(medicine._id))
   );
 
+  // Collect all prescription medicines (from OCR) - for "Thuốc đề xuất" section
+  // Format prescriptionMedicines similar to Web version with hasMatch and suggestionText
+  const formattedPrescriptionMedicines: any[] = [];
+  const prescriptionMedicinesKeys = new Set<string>(); // Track để tránh duplicate
+  
+  console.log('📋 Creating formattedPrescriptionMedicines...');
+  console.log(`  Found medicines: ${foundMedicines.length}`);
+  console.log(`  Not found medicines: ${notFoundMedicines.length}`);
+  
+  // Add found medicines with their original text from prescription
+  foundMedicines.forEach(med => {
+    const medKey = normalizeForComparison(med.originalText || med.productName || '');
+    if (!prescriptionMedicinesKeys.has(medKey)) {
+      prescriptionMedicinesKeys.add(medKey);
+      formattedPrescriptionMedicines.push({
+        originalText: med.originalText,
+        originalDosage: med.dosage || med.originalDosage,
+        matchedProduct: med, // The matched product
+        hasMatch: true
+      });
+    }
+  });
+  
+  console.log(`  Added ${formattedPrescriptionMedicines.length} found medicines to formattedPrescriptionMedicines`);
+  
+  // Add not found medicines - Thêm tất cả, kể cả khi không có suggestions
+  // Add formatted suggestion text for each not-found medicine
+  for (const med of notFoundMedicines) {
+    // Bỏ qua những items không phải là thuốc (như số, địa chỉ, v.v.)
+    if (!med.originalText || med.originalText.length < 3 || /^\d+$/.test(med.originalText.trim())) {
+      continue;
+    }
+
+    // Nếu thuốc này đã có match chính xác trong foundMedicines thì KHÔNG tạo block "Thuốc đề xuất" nữa
+    // Ví dụ: Paracetamol 500mg đã tìm thấy đúng thuốc trong kho thì chỉ hiển thị ở "Thuốc có trong đơn"
+    // So sánh chính xác hơn: so sánh cả tên và hàm lượng
+    const normalizedOriginal = normalizeForComparison(med.originalText);
+    const originalDosageNormalized = med.originalDosage ? normalizeDosageForComparison(med.originalDosage) : null;
+    
+    const hasExactMatchInFound = foundMedicines.some(found => {
+      const foundOriginal = found.originalText || found.productName || '';
+      const foundDosageNormalized = found.dosage ? normalizeDosageForComparison(found.dosage) : null;
+      
+      // So sánh tên thuốc (normalized)
+      const nameMatch = normalizeForComparison(foundOriginal) === normalizedOriginal;
+      
+      // Nếu có hàm lượng, so sánh cả hàm lượng
+      if (originalDosageNormalized && foundDosageNormalized) {
+        return nameMatch && originalDosageNormalized === foundDosageNormalized;
+      }
+      
+      // Nếu không có hàm lượng, chỉ so sánh tên
+      return nameMatch;
+    });
+
+    if (hasExactMatchInFound) {
+      console.log(`ℹ️ Skipping suggestion block for medicine with exact match: "${med.originalText}" (${med.originalDosage || 'no dosage'})`);
+      continue;
+    }
+    
+    // Kiểm tra xem thuốc này đã được thêm vào prescriptionMedicines chưa (tránh duplicate)
+    const medKey = normalizeForComparison(med.originalText || '');
+    if (prescriptionMedicinesKeys.has(medKey)) {
+      console.log(`ℹ️ Medicine already in prescriptionMedicines, skipping: "${med.originalText}"`);
+      continue;
+    }
+    prescriptionMedicinesKeys.add(medKey);
+    
+    if (med.suggestions && med.suggestions.length > 0) {
+      // Format professional suggestion text - truyền tất cả suggestions
+      const suggestionText = await formatSuggestionText(
+        med.originalText,
+        med.originalDosage,
+        med.suggestions,
+        med.aiAnalysis || undefined // Truyền aiAnalysis nếu có
+      );
+      
+      formattedPrescriptionMedicines.push({
+        originalText: med.originalText,
+        originalDosage: med.originalDosage,
+        matchedProduct: null,
+        suggestions: med.suggestions,
+        hasMatch: false,
+        suggestionText: suggestionText // Thêm formatted text cho "Thuốc đề xuất"
+      });
+      console.log(`  ✅ Added not-found medicine with suggestions: "${med.originalText}" (${med.suggestions.length} suggestions)`);
+    } else {
+      // Vẫn thêm vào prescriptionMedicines ngay cả khi không có suggestions
+      // Để hiển thị thông báo "cần tư vấn thêm"
+      formattedPrescriptionMedicines.push({
+        originalText: med.originalText,
+        originalDosage: med.originalDosage,
+        matchedProduct: null,
+        suggestions: [],
+        hasMatch: false,
+        suggestionText: `Không tìm thấy chính xác tên thuốc "${med.originalText}" trong hệ thống. Vui lòng liên hệ dược sĩ để được tư vấn về thuốc này.`
+      });
+      console.log(`  ✅ Added not-found medicine without suggestions: "${med.originalText}"`);
+    }
+  }
+
+  console.log(`📊 Final formattedPrescriptionMedicines: ${formattedPrescriptionMedicines.length} items`);
+  console.log(`  - hasMatch=true: ${formattedPrescriptionMedicines.filter(m => m.hasMatch).length}`);
+  console.log(`  - hasMatch=false: ${formattedPrescriptionMedicines.filter(m => !m.hasMatch).length}`);
+
+  // IMPORTANT: Align with Web behavior
+  // If we couldn't build any formatted prescription medicines (often due to OCR noise / filtered notFound items),
+  // provide a lightweight fallback so the UI can still show "Thuốc đề xuất".
+  // Web backend does this by suggesting in-stock products based on keywords or popular medicines.
+  if (foundMedicines.length === 0 && formattedPrescriptionMedicines.length === 0) {
+    console.log('🔄 Fallback: building suggestion-only prescriptionMedicines (like Web)');
+    try {
+      const usableNotFound = (notFoundMedicines || []).filter((m: any) => {
+        const t = String(m?.originalText || '').trim();
+        // Keep only plausible medicine-ish strings
+        return t.length > 3 && !/^\d+$/.test(t) && /[a-zA-ZÀ-ỹ]/.test(t);
+      });
+
+      const notFoundNames = usableNotFound
+        .map((m: any) => String(m.originalText || '').trim())
+        .filter((name: string) => name.length > 3);
+
+      let relatedProducts: any[] = [];
+
+      // Try keyword-based search from notFound names (first meaningful token)
+      if (notFoundNames.length > 0) {
+        const searchTerms = notFoundNames
+          .map((name) => {
+            const firstWord = name.split(/\s+/)[0];
+            return firstWord && firstWord.length > 3 ? firstWord : null;
+          })
+          .filter((term): term is string => term !== null);
+
+        if (searchTerms.length > 0) {
+          relatedProducts = await Product.find({
+            $or: searchTerms.map((term) => {
+              const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              return { name: { $regex: escapedTerm, $options: 'i' } };
+            }),
+            inStock: true,
+            stockQuantity: { $gt: 0 },
+          })
+            .limit(10)
+            .sort({ isHot: -1, createdAt: -1 });
+        }
+      }
+
+      // If nothing found, fallback to popular in-stock medicines
+      if (relatedProducts.length === 0) {
+        relatedProducts = await Product.find({
+          inStock: true,
+          stockQuantity: { $gt: 0 },
+        })
+          .limit(10)
+          .sort({ isHot: -1, createdAt: -1 });
+      }
+
+      const seenRelatedIds = new Set<string>();
+      const pairCount = Math.min(usableNotFound.length, relatedProducts.length);
+
+      for (let i = 0; i < pairCount; i++) {
+        const notFoundMed = usableNotFound[i];
+        const product = relatedProducts[i];
+        if (!notFoundMed || !product) continue;
+
+        const productId = String(product._id);
+        if (seenRelatedIds.has(productId)) continue;
+        seenRelatedIds.add(productId);
+
+        // Normalize imageUrl (same as other parts of this controller)
+        let imageUrl = product.imageUrl || '';
+        if (imageUrl && !imageUrl.startsWith('http') && !imageUrl.startsWith('/') && !imageUrl.startsWith('data:')) {
+          imageUrl = `/medicine-images/${imageUrl}`;
+        }
+        if (!imageUrl) {
+          imageUrl = '/medicine-images/default-medicine.jpg';
+        }
+
+        const description = await getProductDescription(product);
+
+        formattedPrescriptionMedicines.push({
+          originalText: notFoundMed.originalText,
+          originalDosage: notFoundMed.originalDosage,
+          matchedProduct: null,
+          suggestions: [
+            {
+              productId,
+              productName: product.name || '',
+              price: Number(product.price || 0),
+              originalPrice: Number(product.originalPrice || product.price || 0),
+              unit: product.unit || 'đơn vị',
+              inStock: product.inStock !== undefined ? product.inStock : Number(product.stockQuantity || 0) > 0,
+              stockQuantity: Number(product.stockQuantity || 0),
+              requiresPrescription: product.isPrescription || false,
+              imageUrl,
+              description,
+              brand: product.brand || '',
+              dosage: parseMedicineName(product.name || '').dosage,
+              confidence: 0.5,
+              matchReason: 'related',
+              matchExplanation: 'Gợi ý thay thế khi không xác định được thuốc trong đơn từ OCR',
+            },
+          ],
+          hasMatch: false,
+          suggestionText: `Không tìm thấy chính xác tên thuốc "${String(notFoundMed.originalText || '').trim()}" trong hệ thống. Dưới đây là một số thuốc có thể liên quan để bạn tham khảo (vui lòng hỏi dược sĩ trước khi dùng).`,
+        });
+      }
+
+      console.log(`✅ Fallback added ${formattedPrescriptionMedicines.length} formattedPrescriptionMedicines item(s)`);
+    } catch (fallbackErr: any) {
+      console.error('❌ Fallback suggestion build error (non-blocking):', fallbackErr?.message || fallbackErr);
+    }
+  }
+
   return {
     foundMedicines,
     notFoundMedicines,
-    prescriptionMedicines, // Raw medicines from OCR/text
-    relatedMedicines: uniqueRelatedMedicines.slice(0, 10), // Similar medicines for suggestions
+    prescriptionMedicines: formattedPrescriptionMedicines, // Formatted medicines with hasMatch and suggestionText (for "Thuốc đề xuất" section)
+    relatedMedicines: uniqueRelatedMedicines.slice(0, 10), // Similar medicines for suggestions - limit to 10
     totalEstimatedPrice,
     requiresConsultation,
     analysisNotes,
     confidence,
     analysisTimestamp: new Date(),
-    aiModel: 'pharmacy-v2.0-ocr', // Gemini disabled - using OCR + database matching only
-    extractedInfo // Customer name, doctor, hospital, etc. from OCR
+    aiModel: 'pharmacy-v2.0-ocr' // Gemini disabled - using OCR + database matching only
   };
 }
 

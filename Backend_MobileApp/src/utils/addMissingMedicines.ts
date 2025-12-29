@@ -205,7 +205,7 @@ async function addMissingMedicines() {
         inStock: true,
         stockQuantity: 20 + Math.floor(Math.random() * 180), // 20-199
         isHot: false,
-        isNew: true,
+        isNewProduct: true,
         isPrescription: medicine.isPrescription,
         // Thêm thông tin hạn dùng
         expirationDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 năm

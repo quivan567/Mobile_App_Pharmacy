@@ -128,7 +128,7 @@ async function main() {
       inStock: stockQuantity > 0,
       stockQuantity,
       isHot: idx % 9 === 0,
-      isNew: idx % 7 === 0,
+      isNewProduct: idx % 7 === 0,
       isPrescription: m.isPrescription,
       expirationDate,
       manufacturingDate,

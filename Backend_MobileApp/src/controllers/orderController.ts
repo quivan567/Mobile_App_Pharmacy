@@ -10,6 +10,7 @@ import { NotificationController } from './notificationController';
 import { PaymentController } from './paymentController';
 import { socketService } from '../services/socketService.js';
 import { StockService } from '../services/stockService.js';
+import { publishRealtimeEvent } from '../services/supabaseService.js';
 
 // Helper function to create order status notification
 async function createOrderStatusNotification(
@@ -767,10 +768,21 @@ export class OrderController {
 
       // Emit real-time event for order created
       if (req.user?.id) {
+        // Emit via Socket.IO
         socketService.emitToUser(req.user.id, 'order:created', {
           order: responseData,
           message: `Đơn hàng ${orderNumber} đã được tạo thành công`,
         });
+        
+        // Publish to Supabase real-time (if configured)
+        await publishRealtimeEvent(
+          `user:${req.user.id}`,
+          'order:created',
+          {
+            order: responseData,
+            message: `Đơn hàng ${orderNumber} đã được tạo thành công`,
+          }
+        );
       }
 
       res.status(201).json({
@@ -1370,12 +1382,25 @@ export class OrderController {
 
       // Emit real-time event for order status update
       if (order.userId) {
+        // Emit via Socket.IO
         socketService.emitToUser(String(order.userId), 'order:status:updated', {
           orderId: order._id,
           orderNumber: order.orderNumber,
           status: order.status,
           message: `Đơn hàng ${order.orderNumber} đã được xác nhận`,
         });
+        
+        // Publish to Supabase real-time (if configured)
+        await publishRealtimeEvent(
+          `user:${order.userId}`,
+          'order:status:updated',
+          {
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            status: order.status,
+            message: `Đơn hàng ${order.orderNumber} đã được xác nhận`,
+          }
+        );
       }
       
       res.json({
@@ -1498,12 +1523,25 @@ export class OrderController {
       // Emit real-time event for order status update
       try {
         if (order.userId) {
+          // Emit via Socket.IO
           socketService.emitToUser(String(order.userId), 'order:status:updated', {
             orderId: order._id,
             orderNumber: order.orderNumber,
             status: order.status,
             message: `Đơn hàng ${order.orderNumber} đã được cập nhật`,
           });
+          
+          // Publish to Supabase real-time (if configured)
+          await publishRealtimeEvent(
+            `user:${order.userId}`,
+            'order:status:updated',
+            {
+              orderId: order._id,
+              orderNumber: order.orderNumber,
+              status: order.status,
+              message: `Đơn hàng ${order.orderNumber} đã được cập nhật`,
+            }
+          );
         }
       } catch (socketError: any) {
         console.error('Emit socket event error:', {

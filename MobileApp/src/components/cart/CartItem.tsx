@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -31,6 +31,13 @@ export const CartItem: React.FC<CartItemProps> = ({
   const [fallbackError, setFallbackError] = useState(false);
   const [imageLoading, setImageLoading] = useState(true);
   
+  // Reset error states when product changes
+  useEffect(() => {
+    setImageError(false);
+    setFallbackError(false);
+    setImageLoading(true);
+  }, [product?._id, product?.imageUrl]);
+  
   const primaryImageUrl = useMemo(() => {
     if (!product) return null;
     return getImageUrlWithFallback(product, false, false);
@@ -61,7 +68,10 @@ export const CartItem: React.FC<CartItemProps> = ({
               transition={200}
               onLoadStart={() => setImageLoading(true)}
               onLoadEnd={() => setImageLoading(false)}
-              onError={() => {
+              onError={(error: any) => {
+                // Check if error is a 400 or 404 (common for missing images)
+                // These are expected errors, so we don't need to log them
+                // Try fallback chain: primary -> fallback -> local placeholder
                 if (!imageError && primaryImageUrl) {
                   setImageError(true);
                 } else if (!fallbackError) {

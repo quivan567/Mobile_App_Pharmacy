@@ -368,9 +368,17 @@ export const consultationApi = {
       // Use fetch API for FormData upload in React Native
       // Set timeout to 120 seconds (2 minutes) for OCR + analysis
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 seconds
+      const timeoutId = setTimeout(() => {
+        console.log('Request timeout - aborting...');
+        controller.abort();
+      }, 120000); // 120 seconds
       
       try {
+        console.log('=== Sending fetch request ===');
+        console.log('URL:', `${API_BASE_URL}/api/consultation/analyze`);
+        console.log('Method: POST');
+        console.log('Has signal:', !!controller.signal);
+        
         const response = await fetch(`${API_BASE_URL}/api/consultation/analyze`, {
           method: 'POST',
           headers,
@@ -379,18 +387,24 @@ export const consultationApi = {
         });
         
         clearTimeout(timeoutId);
-      
-      console.log('Response status:', response.status);
-      console.log('Response ok:', response.ok);
-      console.log('Response headers:', Object.fromEntries(response.headers.entries()));
-      
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
-        throw new Error(errorData.message || `HTTP ${response.status}`);
-      }
-      
+        
+        console.log('Response status:', response.status);
+        console.log('Response ok:', response.ok);
+        console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+        
+        if (!response.ok) {
+          let errorData: any = { message: 'Unknown error' };
+          try {
+            const text = await response.text();
+            errorData = text ? JSON.parse(text) : { message: `HTTP ${response.status}` };
+          } catch (parseError) {
+            errorData = { message: `HTTP ${response.status}: ${response.statusText}` };
+          }
+          throw new Error(errorData.message || `HTTP ${response.status}`);
+        }
+        
         const responseData = await response.json();
-        console.log('Response data:', responseData);
+        console.log('Response data received successfully');
         
         return {
           success: responseData.success,
@@ -399,9 +413,42 @@ export const consultationApi = {
         };
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
-        if (fetchError.name === 'AbortError') {
+        
+        // Handle different error types
+        if (fetchError.name === 'AbortError' || fetchError.message?.includes('aborted')) {
+          console.error('Request aborted (timeout)');
           throw new Error('Quá trình phân tích mất quá nhiều thời gian. Vui lòng thử lại với ảnh rõ hơn.');
         }
+        
+        // Handle network errors
+        if (fetchError.message === 'Network request failed' || 
+            fetchError.message?.includes('Network') ||
+            fetchError.message?.includes('Failed to fetch') ||
+            fetchError.message?.includes('fetch')) {
+          console.error('Network error:', {
+            message: fetchError.message,
+            name: fetchError.name,
+            code: (fetchError as any).code,
+            API_BASE_URL,
+          });
+          
+          const isLocalhost = API_BASE_URL.includes('localhost') || API_BASE_URL.includes('127.0.0.1');
+          let errorMessage = 'Không thể kết nối đến server.';
+          
+          if (isLocalhost) {
+            errorMessage += '\n\nNếu bạn đang test trên điện thoại thật:';
+            errorMessage += '\n1. Kiểm tra Backend đang chạy';
+            errorMessage += '\n2. Thay localhost bằng IP máy tính';
+            errorMessage += '\n3. Đảm bảo điện thoại và máy tính cùng mạng WiFi';
+          } else {
+            errorMessage += `\n\nAPI URL: ${API_BASE_URL}`;
+            errorMessage += '\nVui lòng kiểm tra kết nối mạng và đảm bảo backend đang chạy.';
+          }
+          
+          throw new Error(errorMessage);
+        }
+        
+        // Re-throw other errors
         throw fetchError;
       }
     }
@@ -424,9 +471,17 @@ export const consultationApi = {
       
       // Set timeout to 120 seconds (2 minutes) for OCR + analysis
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 seconds
+      const timeoutId = setTimeout(() => {
+        console.log('Request timeout - aborting...');
+        controller.abort();
+      }, 120000); // 120 seconds
       
       try {
+        console.log('=== Sending fetch request (prescriptionId) ===');
+        console.log('URL:', `${API_BASE_URL}/api/consultation/analyze`);
+        console.log('Method: POST');
+        console.log('PrescriptionId:', data.prescriptionId);
+        
         const response = await fetch(`${API_BASE_URL}/api/consultation/analyze`, {
           method: 'POST',
           headers,
@@ -444,13 +499,19 @@ export const consultationApi = {
         console.log('Response ok:', response.ok);
         
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+          let errorData: any = { message: 'Unknown error' };
+          try {
+            const text = await response.text();
+            errorData = text ? JSON.parse(text) : { message: `HTTP ${response.status}` };
+          } catch (parseError) {
+            errorData = { message: `HTTP ${response.status}: ${response.statusText}` };
+          }
           console.error('Error response:', errorData);
           throw new Error(errorData.message || `HTTP ${response.status}`);
         }
         
         const responseData = await response.json();
-        console.log('Response data:', responseData);
+        console.log('Response data received successfully');
         
         return {
           success: responseData.success,
@@ -459,9 +520,42 @@ export const consultationApi = {
         };
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
-        if (fetchError.name === 'AbortError') {
+        
+        // Handle different error types
+        if (fetchError.name === 'AbortError' || fetchError.message?.includes('aborted')) {
+          console.error('Request aborted (timeout)');
           throw new Error('Quá trình phân tích mất quá nhiều thời gian. Vui lòng thử lại với ảnh rõ hơn.');
         }
+        
+        // Handle network errors
+        if (fetchError.message === 'Network request failed' || 
+            fetchError.message?.includes('Network') ||
+            fetchError.message?.includes('Failed to fetch') ||
+            fetchError.message?.includes('fetch')) {
+          console.error('Network error:', {
+            message: fetchError.message,
+            name: fetchError.name,
+            code: (fetchError as any).code,
+            API_BASE_URL,
+          });
+          
+          const isLocalhost = API_BASE_URL.includes('localhost') || API_BASE_URL.includes('127.0.0.1');
+          let errorMessage = 'Không thể kết nối đến server.';
+          
+          if (isLocalhost) {
+            errorMessage += '\n\nNếu bạn đang test trên điện thoại thật:';
+            errorMessage += '\n1. Kiểm tra Backend đang chạy';
+            errorMessage += '\n2. Thay localhost bằng IP máy tính';
+            errorMessage += '\n3. Đảm bảo điện thoại và máy tính cùng mạng WiFi';
+          } else {
+            errorMessage += `\n\nAPI URL: ${API_BASE_URL}`;
+            errorMessage += '\nVui lòng kiểm tra kết nối mạng và đảm bảo backend đang chạy.';
+          }
+          
+          throw new Error(errorMessage);
+        }
+        
+        // Re-throw other errors
         throw fetchError;
       }
     }

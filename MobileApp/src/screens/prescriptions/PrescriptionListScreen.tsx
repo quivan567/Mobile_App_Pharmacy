@@ -14,6 +14,7 @@ import { COLORS } from '../../utils/constants';
 import { Loading } from '../../components/common/Loading';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { logger } from '../../utils/logger';
 
 export default function PrescriptionListScreen() {
@@ -251,7 +252,7 @@ export default function PrescriptionListScreen() {
   }
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
       {/* Stats Section */}
       {stats && (
         <View style={styles.statsContainer}>
@@ -357,7 +358,7 @@ export default function PrescriptionListScreen() {
           initialNumToRender={10}
         />
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 
